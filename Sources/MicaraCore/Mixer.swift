@@ -1,23 +1,23 @@
-// Micara — mixage audio : dominance + noise gate.
+// Micara — audio mixing: dominance + noise gate.
 //
-// Portage 1:1 de `bridge/renderer/mixer.cjs` (module pur du bridge Electron).
-// Pur : aucune dépendance AppKit / AVFoundation / WebRTC, pour rester testable
-// sans matériel audio ni serveur.
+// 1:1 port of `bridge/renderer/mixer.cjs` (the pure module of the Electron
+// bridge). Pure: no AppKit / AVFoundation / WebRTC dependency, so it stays
+// testable without audio hardware or a server.
 
 import Foundation
 
-/// Plancher dBFS (silence numérique). Aligné sur `DB_MIN` du module JS.
+/// dBFS floor (digital silence). Matches `DB_MIN` in the JS module.
 public let dbFloor: Float = -120
 
-/// Gain linéaire correspondant à une valeur en dB (10^(dB/20)).
+/// Linear gain for a value in dB (10^(dB/20)).
 public func gainFromDb(_ db: Float) -> Float {
     powf(10, db / 20)
 }
 
-/// RMS d'un buffer d'échantillons → dBFS, clampé à `dbFloor`.
+/// RMS of a sample buffer → dBFS, clamped to `dbFloor`.
 ///
-/// Le seuil 1e-9 évite un `log10(0)` = -inf sur un buffer strictement muet :
-/// le reste du moteur compare des Float, un -inf contaminerait les moyennes.
+/// The 1e-9 threshold avoids `log10(0)` = -inf on a strictly silent buffer: the
+/// rest of the engine compares Floats, and one -inf would poison the averages.
 public func rmsDb(_ samples: UnsafeBufferPointer<Float>) -> Float {
     if samples.isEmpty { return dbFloor }
     var sum: Float = 0
@@ -31,38 +31,38 @@ public func rmsDb(_ samples: [Float]) -> Float {
     samples.withUnsafeBufferPointer { rmsDb($0) }
 }
 
-/// Mode de mixage, exposé au menu de la barre de menus.
-/// « Dominance + gate » = le mixeur ci-dessous ; « Somme » = gains à 1,
-/// seul le limiteur de sortie protège de l'écrêtage.
+/// Mixing mode, exposed in the menu bar menu.
+/// "Dominance + gate" = the mixer below; "Sum" = gains at 1, with only the
+/// output limiter guarding against clipping.
 public enum MixMode: String, CaseIterable, Codable {
     case dominance
     case sum
 }
 
-/// Constantes de mixage — valeurs par défaut = `MIX` de `renderer/src/engine.js`,
-/// réglées en réunion réelle (voir les commentaires du JS).
+/// Mixing constants — defaults are `MIX` from `renderer/src/engine.js`, tuned
+/// in real meetings (see the comments in the JS).
 public struct MixerConfig: Equatable {
-    /// dBFS : ouverture du gate (parole).
+    /// dBFS: gate opens (speech).
     public var gateOpenDb: Float
-    /// dBFS : fermeture du gate, plus bas que l'ouverture (hystérésis anti-clapot).
+    /// dBFS: gate closes, lower than the opening (hysteresis against chatter).
     public var gateCloseDb: Float
-    /// Maintien avant fermeture : sans lui, les fins de mots sont coupées.
+    /// Hold before closing: without it, word endings get cut off.
     public var gateHoldMs: Double
-    /// Atténuation des flux ouverts mais non dominants.
+    /// Attenuation of streams that are open but not dominant.
     public var duckDb: Float
-    /// Le challenger doit dépasser le dominant d'au moins autant pour prendre la main.
+    /// The challenger must beat the dominant by at least this much to take over.
     public var dominanceMarginDb: Float
-    /// Délai minimum entre deux bascules de dominant.
+    /// Minimum delay between two dominant switches.
     public var dominanceDwellMs: Double
-    /// Montée du gain vers la cible (nouveau dominant).
+    /// Gain rise towards the target (new dominant).
     public var attackSec: Float
-    /// Descente du gain vers la cible (gate qui ferme, ancien dominant).
+    /// Gain fall towards the target (gate closing, former dominant).
     public var releaseSec: Float
-    /// Période de calcul des niveaux.
+    /// Level computation period.
     public var tickMs: Double
-    /// Gain appliqué AVANT la mesure de niveau : un téléphone posé à 1-2 m mesure
-    /// -66/-75 dBFS, le gate -45 ne s'ouvrait jamais. +10 dB et pas plus : +18 dB
-    /// saturait le limiteur (« voix déformée » — retours réels 19/08).
+    /// Gain applied BEFORE level measurement: a phone lying 1-2 m away measures
+    /// -66/-75 dBFS, so the -45 gate never opened. +10 dB and no more: +18 dB
+    /// saturated the limiter ("distorted voice" — real feedback, 19/08).
     public var inputGainDb: Float
 
     public static let `default` = MixerConfig()
@@ -92,8 +92,8 @@ public struct MixerConfig: Equatable {
     }
 }
 
-/// Niveau mesuré d'un flux sur un tick. `id` est opaque (phoneId, ou l'id du
-/// micro local, que le mixeur traite comme n'importe quel autre flux).
+/// Measured level of one stream for a tick. `id` is opaque (a phoneId, or the
+/// local mic's id, which the mixer treats like any other stream).
 public struct LevelEntry: Equatable {
     public let id: String
     public let db: Float
@@ -103,8 +103,8 @@ public struct LevelEntry: Equatable {
     }
 }
 
-/// Résultat d'un tick : gains CIBLES (0…1). Le moteur audio les lisse
-/// (`GainSmoother`) — appliquer ces valeurs brutes produirait des clics.
+/// Result of a tick: TARGET gains (0…1). The audio engine smooths them
+/// (`GainSmoother`) — applying these raw values would produce clicks.
 public struct TickResult: Equatable {
     public let gains: [String: Float]
     public let dominant: String?
@@ -116,24 +116,24 @@ public struct TickResult: Equatable {
     }
 }
 
-/// Mixeur dominance + noise gate.
+/// Dominance + noise gate mixer.
 ///
-/// Un seul flux « parle » à gain 1 ; les autres flux ouverts sont atténués de
-/// `duckDb`, les flux fermés sont à 0. L'anti-clapot (marge + dwell) existe
-/// parce que sans lui deux locuteurs de niveaux proches font basculer le
-/// dominant à chaque tick (50 ms) : comme l'attaque (50 ms) ≈ la période de
-/// tick et que le release est lent (300 ms), les deux gains restent à
-/// mi-course et les deux micros restent audibles (constaté le 18/08).
+/// One stream "speaks" at gain 1; the other open streams are ducked by
+/// `duckDb`, closed streams sit at 0. The anti-chatter rule (margin + dwell)
+/// exists because without it two speakers at similar levels flip the dominant
+/// on every tick (50 ms): since the attack (50 ms) ≈ the tick period and the
+/// release is slow (300 ms), both gains stay half-way up and both mics stay
+/// audible (observed on 18/08).
 public final class DominanceMixer {
     private struct GateState {
         var open = false
-        /// Dernier instant où le flux était au-dessus du seuil de fermeture.
+        /// Last moment the stream was above the closing threshold.
         var lastOpenMs: Double = 0
     }
 
     public let config: MixerConfig
     private var states: [String: GateState] = [:]
-    /// Dominant actuel, persistant entre les ticks (c'est lui que le dwell protège).
+    /// Current dominant, kept across ticks (this is what the dwell protects).
     public private(set) var dominantId: String?
     private var lastSwitchMs: Double = 0
 
@@ -141,9 +141,9 @@ public final class DominanceMixer {
         self.config = config
     }
 
-    /// Calcule les gains cibles pour ce tick. `nowMs` est l'horloge du moteur.
+    /// Computes the target gains for this tick. `nowMs` is the engine's clock.
     public func tick(_ entries: [LevelEntry], nowMs: Double) -> TickResult {
-        // 1) gate par flux : hystérésis + hold
+        // 1) per-stream gate: hysteresis + hold
         for e in entries {
             var st = states[e.id] ?? GateState()
             if !st.open {
@@ -152,14 +152,14 @@ public final class DominanceMixer {
                     st.lastOpenMs = nowMs
                 }
             } else if e.db >= config.gateCloseDb {
-                st.lastOpenMs = nowMs // au-dessus du seuil bas → on reste ouvert
+                st.lastOpenMs = nowMs // above the low threshold → stay open
             } else if nowMs - st.lastOpenMs >= config.gateHoldMs {
                 st.open = false
             }
             states[e.id] = st
         }
 
-        // 2) dominance parmi les flux ouverts, avec anti-clapot.
+        // 2) dominance among the open streams, with anti-chatter.
         let open = entries.filter { states[$0.id]?.open == true }
         let openCount = open.count
         var dominant: String?
@@ -167,17 +167,17 @@ public final class DominanceMixer {
             var loudest = first
             for e in open where e.db > loudest.db { loudest = e }
             let cur = dominantId
-            // Le dominant sortant ne compte que s'il est encore là ET ouvert :
-            // sinon la place est libre et le plus fort la prend sans attendre.
+            // The outgoing dominant only counts if it is still here AND open:
+            // otherwise the seat is free and the loudest takes it right away.
             let curEntry = cur.flatMap { c in open.first { $0.id == c } }
             if let curEntry, let cur {
                 if loudest.id == cur {
                     dominant = cur
                 } else if nowMs - lastSwitchMs >= config.dominanceDwellMs
                     && loudest.db >= curEntry.db + config.dominanceMarginDb {
-                    dominant = loudest.id // nettement plus fort ET délai écoulé
+                    dominant = loudest.id // clearly louder AND the dwell elapsed
                 } else {
-                    dominant = cur // trop proche ou trop tôt → on garde
+                    dominant = cur // too close or too soon → keep it
                 }
             } else {
                 dominant = loudest.id
@@ -188,7 +188,7 @@ public final class DominanceMixer {
             lastSwitchMs = nowMs
         }
 
-        // 3) gains cibles
+        // 3) target gains
         let duckGain = gainFromDb(config.duckDb)
         var gains: [String: Float] = [:]
         gains.reserveCapacity(entries.count)
@@ -199,29 +199,29 @@ public final class DominanceMixer {
         return TickResult(gains: gains, dominant: dominant, openCount: openCount)
     }
 
-    /// Oublie un flux (téléphone déconnecté) — évite les états orphelins.
-    /// Si c'était le dominant, le plus fort reprend la main au prochain tick.
+    /// Forgets a stream (phone disconnected) — avoids orphan states.
+    /// If it was the dominant, the loudest takes over on the next tick.
     public func forget(id: String) {
         states.removeValue(forKey: id)
         if dominantId == id { dominantId = nil }
     }
 }
 
-/// Lissage exponentiel one-pole d'un gain vers sa cible.
+/// One-pole exponential smoothing of a gain towards its target.
 ///
-/// Remplace `setTargetAtTime` de la Web Audio API, qu'AVAudioEngine n'a pas :
-/// appliquer les gains cibles du mixeur tels quels produirait un clic à chaque
-/// bascule. À chaque pas de `dt` secondes :
+/// Replaces the Web Audio API's `setTargetAtTime`, which AVAudioEngine lacks:
+/// applying the mixer's target gains as-is would click on every switch. On each
+/// step of `dt` seconds:
 ///
 ///     g += (target - g) * (1 - exp(-dt / tau))
 ///
-/// `tau` vaut `attackSec` quand la cible monte, `releaseSec` quand elle
-/// descend : la parole doit s'ouvrir vite (50 ms) mais se refermer lentement
-/// (300 ms), sinon les fins de mots s'entendent hachées.
+/// `tau` is `attackSec` when the target rises and `releaseSec` when it falls:
+/// speech must open fast (50 ms) but close slowly (300 ms), otherwise word
+/// endings sound chopped.
 public struct GainSmoother {
     public var attackSec: Float
     public var releaseSec: Float
-    /// Gain courant (état du lissage).
+    /// Current gain (the smoother's state).
     public private(set) var value: Float
 
     public init(attackSec: Float = MixerConfig.default.attackSec,
@@ -235,7 +235,7 @@ public struct GainSmoother {
     @discardableResult
     public mutating func step(target: Float, dtSec: Float) -> Float {
         let tau = target > value ? attackSec : releaseSec
-        // tau ou dt nuls : pas de lissage possible → saut direct (évite un NaN).
+        // tau or dt at zero: no smoothing possible → jump straight (avoids a NaN).
         guard tau > 0, dtSec > 0 else {
             value = target
             return value
@@ -244,7 +244,7 @@ public struct GainSmoother {
         return value
     }
 
-    /// Force le gain sans lissage (branchement d'un flux, arrêt de réunion).
+    /// Forces the gain with no smoothing (stream hooked up, meeting stopped).
     public mutating func reset(to newValue: Float) {
         value = newValue
     }

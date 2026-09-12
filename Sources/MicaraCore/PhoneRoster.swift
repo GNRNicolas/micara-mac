@@ -1,17 +1,16 @@
-// Micara — état des points de la barre (un point par téléphone).
+// Micara — state of the bar's dots (one dot per phone).
 //
-// Logique pure, sans AppKit : la barre ne fait que peindre `dots`. Le but est
-// qu'un téléphone corresponde à UN point du début à la fin de la réunion,
-// même quand le réseau hoquette — un point qui apparaît et disparaît fait
-// croire à un départ.
+// Pure logic, no AppKit: the bar only paints `dots`. The goal is that one phone
+// maps to ONE dot from the start of the meeting to its end, even when the
+// network hiccups — a dot that appears and vanishes reads as someone leaving.
 
 import Foundation
 
 public enum PhoneDotState: Equatable {
-    /// Vert : liaison média vivante.
+    /// Green: the media link is alive.
     case connected
-    /// Orange : soit la liaison média est tombée, soit le téléphone est parti
-    /// et on lui laisse le temps de revenir (« fantôme »).
+    /// Orange: either the media link dropped, or the phone left and we are
+    /// giving it time to come back (a "ghost").
     case reconnecting
 }
 
@@ -29,14 +28,14 @@ public struct PhoneRoster: Equatable {
     private struct Entry: Equatable {
         var id: String
         var state: PhoneDotState
-        /// Instant du départ (`left`) : seuls ces points-là expirent.
+        /// Moment of departure (`left`): only these dots ever expire.
         var ghostSinceMs: Double?
     }
 
-    /// Ordre stable = ordre d'arrivée. Un tableau, pas un dictionnaire : les
-    /// points ne doivent pas changer de place d'un tick à l'autre.
+    /// Stable order = arrival order. An array, not a dictionary: the dots must
+    /// not swap places from one tick to the next.
     private var entries: [Entry] = []
-    /// Délai laissé à un téléphone parti pour revenir avant que son point parte.
+    /// Grace given to a departed phone to come back before its dot goes away.
     public let ghostTTLMs: Double
 
     public init(ghostTTLMs: Double = 30_000) {
@@ -49,13 +48,12 @@ public struct PhoneRoster: Equatable {
 
     public var isEmpty: Bool { entries.isEmpty }
 
-    /// Nouveau téléphone annoncé par le serveur.
+    /// New phone announced by the server.
     ///
-    /// Un téléphone qui se reconnecte reçoit un phoneId NEUF (le serveur en
-    /// tire un à chaque WebSocket). S'il reste un fantôme, on suppose donc que
-    /// c'est le même appareil qui revient et on reprend sa place : sinon la
-    /// barre montrerait deux points pour un seul téléphone. On retire le
-    /// fantôme le plus ancien — c'est celui qui a le plus attendu.
+    /// A reconnecting phone gets a BRAND-NEW phoneId (the server draws one per
+    /// WebSocket). So if a ghost remains, we assume it is the same device
+    /// coming back and reuse its slot: otherwise the bar would show two dots
+    /// for a single phone. We take the oldest ghost — it has waited longest.
     public mutating func joined(id: String, nowMs: Double) {
         prune(nowMs: nowMs)
         if let existing = entries.firstIndex(where: { $0.id == id }) {
@@ -68,16 +66,16 @@ public struct PhoneRoster: Equatable {
             .filter({ $0.element.ghostSinceMs != nil })
             .min(by: { $0.element.ghostSinceMs! < $1.element.ghostSinceMs! })?
             .offset {
-            // On réutilise la position du fantôme : le point ne saute pas en
-            // bout de barre pendant une simple reconnexion.
+            // Reuse the ghost's position: the dot must not jump to the end of
+            // the bar over a mere reconnection.
             entries[oldestGhost] = Entry(id: id, state: .connected, ghostSinceMs: nil)
             return
         }
         entries.append(Entry(id: id, state: .connected, ghostSinceMs: nil))
     }
 
-    /// La liaison WebRTC est tombée (ICE disconnected) mais le téléphone est
-    /// toujours là : même id, point orange, aucune expiration.
+    /// The WebRTC link dropped (ICE disconnected) but the phone is still here:
+    /// same id, orange dot, no expiry.
     public mutating func mediaLost(id: String, nowMs: Double) {
         prune(nowMs: nowMs)
         guard let i = entries.firstIndex(where: { $0.id == id }) else { return }
@@ -92,9 +90,9 @@ public struct PhoneRoster: Equatable {
         entries[i].ghostSinceMs = nil
     }
 
-    /// Le téléphone a quitté (`phone-left`). Son point devient un fantôme
-    /// orange : un passage de tunnel ou un verrouillage d'écran coupe le
-    /// WebSocket, l'appareil revient dans la foulée sous un nouvel id.
+    /// The phone left (`phone-left`). Its dot becomes an orange ghost: a tunnel
+    /// or a screen lock cuts the WebSocket, and the device comes straight back
+    /// under a new id.
     public mutating func left(id: String, nowMs: Double) {
         prune(nowMs: nowMs)
         guard let i = entries.firstIndex(where: { $0.id == id }) else { return }
@@ -102,8 +100,8 @@ public struct PhoneRoster: Equatable {
         entries[i].ghostSinceMs = nowMs
     }
 
-    /// Retire les fantômes périmés. À appeler périodiquement : sans nouvel
-    /// événement, rien d'autre ne fait disparaître un point.
+    /// Drops expired ghosts. Call it periodically: with no new event, nothing
+    /// else makes a dot disappear.
     public mutating func prune(nowMs: Double) {
         entries.removeAll { entry in
             guard let since = entry.ghostSinceMs else { return false }

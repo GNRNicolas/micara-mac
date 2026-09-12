@@ -1,8 +1,8 @@
 #!/bin/bash
-# Construit Micara.app ; --install la pose dans /Applications et la lance.
-# Même forme que build.sh d'Eyesaver, plus deux choses que Micara ne peut pas
-# éviter : le framework WebRTC (binaire, téléchargé une fois dans Vendor/) et le
-# driver BlackHole (installeur système, mot de passe demandé une fois).
+# Builds Micara.app; --install puts it in /Applications and starts it.
+# Same shape as Eyesaver's build.sh, plus two things Micara cannot avoid: the
+# WebRTC framework (a binary, downloaded once into Vendor/) and the BlackHole
+# driver (a system installer, password asked once).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -16,13 +16,12 @@ WEBRTC_SHA="a523cd141d2aa6c3638d49fea1f72b0aafd28a8818c35fc240e08418da3d2fda"
 BLACKHOLE_DRIVER="/Library/Audio/Plug-Ins/HAL/BlackHole16ch.driver"
 BLACKHOLE_PKG="Resources/BlackHole16ch-0.7.1.pkg"
 
-# --- WebRTC : téléchargé par curl, pas par SwiftPM ----------------------------
-# SwiftPM sait télécharger un binaryTarget, mais échoue dès que le trousseau
-# contient plusieurs identifiants pour github.com (cas de toute machine avec gh
-# multi-comptes). curl + somme SHA-256 vérifiée, et Package.swift pointe sur le
-# dossier local.
+# --- WebRTC: downloaded by curl, not by SwiftPM --------------------------------
+# SwiftPM can download a binaryTarget, but fails as soon as the keychain holds
+# several identities for github.com (the case on any machine with a multi-account
+# gh). curl plus a checked SHA-256, and Package.swift points at the local folder.
 if [ ! -d Vendor/LiveKitWebRTC.xcframework ]; then
-  echo "→ téléchargement de WebRTC $WEBRTC_VERSION (69 Mo, une seule fois)"
+  echo "→ downloading WebRTC $WEBRTC_VERSION (69 MB, once)"
   mkdir -p Vendor
   curl -sSL -o Vendor/webrtc.zip "$WEBRTC_URL"
   echo "$WEBRTC_SHA  Vendor/webrtc.zip" | shasum -a 256 -c - >/dev/null
@@ -30,28 +29,28 @@ if [ ! -d Vendor/LiveKitWebRTC.xcframework ]; then
   rm Vendor/webrtc.zip
 fi
 
-# --- BlackHole : le seul moment où un mot de passe est demandé ----------------
-# Un micro virtuel est un driver dans /Library/Audio/Plug-Ins/HAL : impossible
-# sans droits admin, quelle que soit l'app. On le fait ici, en clair, une fois.
+# --- BlackHole: the only moment a password is asked ----------------------------
+# A virtual microphone is a driver in /Library/Audio/Plug-Ins/HAL: impossible
+# without admin rights, whatever the app. Do it here, in the open, once.
 if [ "${1:-}" = "--install" ] && [ ! -d "$BLACKHOLE_DRIVER" ]; then
-  echo "→ BlackHole 16ch (micro virtuel, licence GPL-3.0) n'est pas installé."
-  echo "  macOS demande votre mot de passe pour poser le driver audio."
+  echo "→ BlackHole 16ch (virtual microphone, GPL-3.0) is not installed."
+  echo "  macOS asks for your password to put the audio driver in place."
   sudo installer -pkg "$BLACKHOLE_PKG" -target / >/dev/null
-  echo "  installé."
+  echo "  installed."
 fi
 
-# --- Compilation ----------------------------------------------------------------
+# --- Build ----------------------------------------------------------------------
 rm -rf build
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 
-# Le framework vit dans Contents/Frameworks : l'exécutable doit le chercher là,
-# pas dans .build/ où SwiftPM l'a lié.
+# The framework lives in Contents/Frameworks: the executable has to look for it
+# there, not in .build/ where SwiftPM linked it.
 swift build -c release --arch arm64 \
   -Xlinker -rpath -Xlinker @executable_path/../Frameworks >/dev/null
 cp ".build/arm64-apple-macosx/release/$NAME" "$APP/Contents/MacOS/$NAME"
 cp -R "Vendor/LiveKitWebRTC.xcframework/macos-arm64_x86_64/LiveKitWebRTC.framework" "$APP/Contents/Frameworks/"
 
-# --- Icône ------------------------------------------------------------------------
+# --- Icon -------------------------------------------------------------------------
 if [ ! -f "Resources/$NAME.icns" ]; then
   mkdir -p "build/$NAME.iconset"
   for pair in "16 16x16" "32 16x16@2x" "32 32x32" "64 32x32@2x" "128 128x128" \
@@ -79,21 +78,21 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
-  <!-- Agent : pas d'icône dans le Dock, pas de barre de menus d'application. -->
+  <!-- Agent: no Dock icon, no application menu bar. -->
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
-  <!-- Sans cette clé, macOS tue l'app au premier accès au micro. -->
-  <key>NSMicrophoneUsageDescription</key><string>Micara mixe le micro de ce Mac avec ceux des téléphones de la salle.</string>
+  <!-- Without this key, macOS kills the app on its first microphone access. -->
+  <key>NSMicrophoneUsageDescription</key><string>Micara mixes this Mac's microphone with the phones in the room.</string>
 </dict>
 </plist>
 PLIST
 
-# Signature ad hoc, identifiant stable. Le framework d'abord : une signature de
-# bundle ne couvre pas un framework non signé.
+# Ad-hoc signature, stable identifier. The framework first: a bundle signature
+# does not cover an unsigned framework.
 codesign --force --sign - "$APP/Contents/Frameworks/LiveKitWebRTC.framework"
 codesign --force --sign - --identifier "$ID" "$APP"
 
-# --- Installation -------------------------------------------------------------------
+# --- Install -------------------------------------------------------------------------
 if [ "${1:-}" = "--install" ]; then
   if pkill -f "$NAME.app/Contents/MacOS/$NAME" 2>/dev/null; then
     sleep 2
@@ -101,12 +100,12 @@ if [ "${1:-}" = "--install" ]; then
   rm -rf "/Applications/$NAME.app"
   cp -R "$APP" "/Applications/"
   rm -rf "$APP"
-  # « Mettre à jour » dans l'app relance ce script depuis ce dossier.
+  # "Update" in the app re-runs this script from this folder.
   defaults write "$ID" sourcePath -string "$(pwd)"
   open "/Applications/$NAME.app"
-  echo "→ installé dans /Applications et lancé"
-  echo "  Pas de fenêtre, pas d'icône dans le Dock : cherchez le micro dans la barre"
-  echo "  de menus, en haut à droite, près de l'horloge."
+  echo "→ installed in /Applications and started"
+  echo "  No window, no Dock icon: look for the microphone in the menu bar, top"
+  echo "  right, near the clock."
 else
   echo "→ $(pwd)/$APP"
 fi

@@ -1,33 +1,36 @@
-// Aggregate.swift — CoreAudio pur : périphérique agrégé « Micara » + micro par défaut.
+// Aggregate.swift — pure CoreAudio: the "Micara" aggregate device and the
+// default input.
 //
-// Portage fidèle de `../bridge/native/micara-audio.c` (helper C du bridge Electron)
-// et remplacement de `SwitchAudioSource` (`../bridge/lib/mic-setup.js`).
+// A faithful port of `../bridge/native/micara-audio.c` (the C helper of the
+// Electron bridge) and a replacement for `SwitchAudioSource`
+// (`../bridge/lib/mic-setup.js`).
 //
-// POURQUOI UN AGRÉGAT : Teams/Zoom affichent le NOM du device d'entrée. Le driver
-// BlackHole s'appelle « BlackHole 16ch », et ce nom est compilé dans le driver :
-// le renommer imposerait de forker + recompiler + resigner (compte Apple Developer).
-// Un périphérique agrégé CoreAudio qui enveloppe BlackHole 16ch donne le bon nom
-// SANS AUCUN privilège : un agrégat vit dans les réglages audio de l'utilisateur
-// (AudioHardwareCreateAggregateDevice), là où installer un driver exige root.
+// WHY AN AGGREGATE: Teams/Zoom show the NAME of the input device. The BlackHole
+// driver is called "BlackHole 16ch", and that name is compiled into the driver:
+// renaming it would mean forking, recompiling and resigning it (an Apple
+// Developer account). A CoreAudio aggregate device wrapping BlackHole 16ch
+// gives the right name WITH NO privilege at all: an aggregate lives in the
+// user's own audio settings (AudioHardwareCreateAggregateDevice), where
+// installing a driver needs root.
 //
-// POURQUOI PLUS DE BINAIRE C NI DE SwitchAudioSource : en Swift, l'API HAL est
-// directement accessible dans le process de l'app. Plus de fork/exec, plus de
-// parsing JSON, plus de binaire tiers à embarquer et à faire vivre dans les
-// ressources — et surtout : l'erreur CoreAudio remonte telle quelle (OSStatus)
-// au lieu d'un code de retour 0/1.
+// WHY NO MORE C BINARY AND NO MORE SwitchAudioSource: in Swift the HAL API is
+// reachable straight from the app's process. No fork/exec, no JSON parsing, no
+// third-party binary to ship and keep alive in the resources — and above all:
+// the CoreAudio error comes back as it is (OSStatus) instead of a 0/1 exit
+// code.
 //
-// INVARIANT REPRIS DU C : on ne touche JAMAIS un agrégat qu'on n'a pas créé.
-// L'identité est l'UID `com.getmicara.bridge.aggregate`, PAS le nom affiché
-// (que l'utilisateur peut changer dans Configuration audio et MIDI).
+// INVARIANT KEPT FROM THE C: NEVER touch an aggregate we did not create. The
+// identity is the UID `com.getmicara.bridge.aggregate`, NOT the displayed name
+// (which the user can change in Audio MIDI Setup).
 
 import CoreAudio
 import Foundation
 
-// MARK: - Erreurs
+// MARK: - Errors
 
 enum AudioDeviceError: Error, CustomStringConvertible {
-    /// Un appel HAL a échoué. Le `String` nomme l'opération (utile en journal :
-    /// un OSStatus seul ne dit pas d'où il vient).
+    /// A HAL call failed. The `String` names the operation (useful in the log:
+    /// an OSStatus alone does not say where it came from).
     case osStatus(OSStatus, String)
     case notFound(String)
     case blackHoleMissing
@@ -35,13 +38,13 @@ enum AudioDeviceError: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case let .osStatus(status, what):
-            // Les OSStatus CoreAudio sont souvent des FourCC ('!obj', 'stop'…) :
-            // on affiche les deux formes, sinon le code brut est indéchiffrable.
-            return "CoreAudio \(what) a échoué (OSStatus \(status)\(Self.fourCC(status)))"
+            // CoreAudio OSStatus values are often FourCCs ('!obj', 'stop'…):
+            // print both forms, otherwise the raw code is unreadable.
+            return "CoreAudio \(what) failed (OSStatus \(status)\(Self.fourCC(status)))"
         case let .notFound(uid):
-            return "Aucun périphérique audio avec l'UID « \(uid) »"
+            return "No audio device with UID \"\(uid)\""
         case .blackHoleMissing:
-            return "BlackHole 16ch n'est pas installé"
+            return "BlackHole 16ch is not installed"
         }
     }
 
@@ -52,7 +55,7 @@ enum AudioDeviceError: Error, CustomStringConvertible {
     }
 }
 
-// MARK: - Description d'un device
+// MARK: - Device description
 
 struct AudioDeviceInfo: Equatable {
     let id: AudioObjectID
@@ -63,11 +66,11 @@ struct AudioDeviceInfo: Equatable {
     let isAggregate: Bool
 }
 
-// MARK: - Accès HAL
+// MARK: - HAL access
 
 enum AudioDevices {
 
-    // --- primitives de lecture de propriété (équivalents des helpers du C) ---
+    // --- property-reading primitives (the C helpers' equivalents) ---
 
     private static func address(
         _ selector: AudioObjectPropertySelector,
@@ -80,8 +83,8 @@ enum AudioDevices {
         )
     }
 
-    /// Lit une propriété de type CFString (UID, nom). `nil` si le device ne la
-    /// publie pas — c'est courant et jamais fatal, on filtre plus haut.
+    /// Reads a CFString property (UID, name). `nil` when the device does not
+    /// publish it — common and never fatal, filtered higher up.
     fileprivate static func string(
         _ device: AudioObjectID,
         _ selector: AudioObjectPropertySelector
@@ -96,9 +99,10 @@ enum AudioDevices {
         return value as String
     }
 
-    /// Somme des canaux de tous les buffers du device dans un scope donné —
-    /// même calcul que `device_channels()` du C (un device peut exposer
-    /// plusieurs buffers, en compter un seul sous-estime les canaux).
+    /// Sum of the channels of every buffer of the device in a given scope —
+    /// the same computation as `device_channels()` in the C (a device can
+    /// expose several buffers, and counting only one underestimates the
+    /// channels).
     fileprivate static func channels(
         _ device: AudioObjectID,
         scope: AudioObjectPropertyScope
@@ -142,13 +146,13 @@ enum AudioDevices {
         return ids
     }
 
-    // --- API publique ---
+    // --- public API ---
 
     static func all() -> [AudioDeviceInfo] {
         deviceIDs().compactMap { id in
-            // Un device sans UID n'est pas adressable de façon stable : on
-            // l'ignore plutôt que d'inventer une clé (le C le laissait passer
-            // avec une chaîne vide, ce qui polluait la liste).
+            // A device with no UID cannot be addressed in a stable way: skip it
+            // rather than invent a key (the C let it through with an empty
+            // string, which polluted the list).
             guard let uid = string(id, kAudioDevicePropertyDeviceUID) else { return nil }
             return AudioDeviceInfo(
                 id: id,
@@ -165,7 +169,7 @@ enum AudioDevices {
         all().first { $0.uid == uid }
     }
 
-    /// UID du device pointé par une propriété « device par défaut » du système.
+    /// UID of the device a system "default device" property points to.
     private static func defaultDeviceUID(_ selector: AudioObjectPropertySelector) -> String? {
         var addr = address(selector)
         var device = AudioObjectID(kAudioObjectUnknown)
@@ -179,9 +183,9 @@ enum AudioDevices {
         defaultDeviceUID(kAudioHardwarePropertyDefaultInputDevice)
     }
 
-    /// POURQUOI exposer la sortie par défaut : le moteur audio doit savoir où
-    /// NE PAS jouer. Si l'utilisateur a mis BlackHole en sortie système, jouer
-    /// sur « le device par défaut » réinjecterait le mix dans lui-même.
+    /// WHY the default output is exposed: the audio engine has to know where
+    /// NOT to play. If the user set BlackHole as the system output, playing on
+    /// "the default device" would feed the mix back into itself.
     static func defaultOutputUID() -> String? {
         defaultDeviceUID(kAudioHardwarePropertyDefaultOutputDevice)
     }
@@ -199,9 +203,9 @@ enum AudioDevices {
         }
     }
 
-    /// Jeton d'écoute : tant qu'il est retenu, `handler` est appelé à chaque
-    /// changement de la liste des devices. Son `deinit` retire le listener —
-    /// c'est le seul moyen sûr de ne pas laisser un bloc pendre dans le HAL.
+    /// Listening token: as long as it is held, `handler` is called on every
+    /// change to the device list. Its `deinit` removes the listener — the only
+    /// safe way not to leave a block dangling in the HAL.
     final class ListenerToken {
         private var address: AudioObjectPropertyAddress
         private let block: AudioObjectPropertyListenerBlock
@@ -217,9 +221,10 @@ enum AudioDevices {
         }
     }
 
-    /// Observe l'arrivée/départ de devices (BlackHole installé, casque branché,
-    /// agrégat créé par un autre process…). Callback sur la main queue : les
-    /// appelants sont l'UI et le moteur audio, tous deux pilotés depuis le main.
+    /// Watches devices coming and going (BlackHole installed, headphones
+    /// plugged in, an aggregate created by another process…). The callback
+    /// lands on the main queue: the callers are the UI and the audio engine,
+    /// both driven from the main thread.
     @discardableResult
     static func observeDeviceList(_ handler: @escaping () -> Void) -> AnyObject {
         var addr = address(kAudioHardwarePropertyDevices)
@@ -229,34 +234,35 @@ enum AudioDevices {
     }
 }
 
-// MARK: - Agrégat « Micara »
+// MARK: - The "Micara" aggregate
 
 enum MicaraAggregate {
     static let uid = "com.getmicara.bridge.aggregate"
     static let name = "Micara"
-    /// UID du driver officiel BlackHole 16ch (constante du driver, stable
-    /// depuis la v0.2). Repli par nom si le driver change un jour d'UID.
+    /// UID of the official BlackHole 16ch driver (a driver constant, stable
+    /// since v0.2). Falls back to matching by name should the driver ever
+    /// change its UID.
     static let blackHoleUID = "BlackHole16ch_UID"
 
     struct Status: Equatable {
         let present: Bool
         let healthy: Bool
         let blackHolePresent: Bool
-        /// UID de l'agrégat quand il existe (à passer à `setDefaultInput`),
-        /// `nil` sinon.
+        /// UID of the aggregate when it exists (to hand to `setDefaultInput`),
+        /// `nil` otherwise.
         let deviceUID: String?
     }
 
-    /// BlackHole utilisable par Micara : l'UID officiel du 16ch d'abord, sinon
-    /// tout device dont le nom contient « blackhole » SANS « 2ch » ni « mirror ».
-    /// Invariant du projet (cf. `lib/mic-setup.js`) : le 2ch n'est JAMAIS utilisé.
+    /// BlackHole usable by Micara: the official 16ch UID first, otherwise any
+    /// device whose name contains "blackhole" WITHOUT "2ch" or "mirror".
+    /// Project invariant (see `lib/mic-setup.js`): the 2ch is NEVER used.
     fileprivate static func findBlackHole() -> AudioDeviceInfo? {
         let devices = AudioDevices.all()
         if let exact = devices.first(where: { $0.uid == blackHoleUID }) { return exact }
         return devices.first { device in
-            // Ne jamais empiler un agrégat : un agrégat qui contient BlackHole
-            // porte « blackhole » dans son nom et deviendrait un sous-device
-            // récursif.
+            // Never stack an aggregate on an aggregate: one containing
+            // BlackHole carries "blackhole" in its name and would become a
+            // recursive sub-device.
             guard !device.isAggregate else { return false }
             let n = device.name.lowercased()
             return n.contains("blackhole")
@@ -266,10 +272,10 @@ enum MicaraAggregate {
 
     static var blackHoleInstalled: Bool { findBlackHole() != nil }
 
-    /// L'agrégat contient-il déjà ce sous-device ? ROBUSTESSE : si BlackHole a
-    /// été désinstallé puis réinstallé, l'agrégat peut être vide → il
-    /// apparaîtrait dans la liste de Teams mais serait MUET, pire que pas
-    /// d'agrégat du tout.
+    /// Does the aggregate already contain this sub-device? ROBUSTNESS: if
+    /// BlackHole was uninstalled then reinstalled, the aggregate can be empty →
+    /// it would still appear in the Teams list but be MUTE, worse than no
+    /// aggregate at all.
     private static func hasSubDevice(_ aggregate: AudioObjectID, uid: String) -> Bool {
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioAggregateDevicePropertyFullSubDeviceList,
@@ -282,8 +288,8 @@ enum MicaraAggregate {
             AudioObjectGetPropertyData(aggregate, &addr, 0, nil, &size, $0)
         }
         guard status == noErr, let subs = list as? [Any] else { return false }
-        // La liste contient des CFString (UID des sous-devices) ; certaines
-        // versions de macOS y mettent des dictionnaires décrivant le sous-device.
+        // The list holds CFStrings (the sub-device UIDs); some macOS versions
+        // put dictionaries describing the sub-device in it instead.
         return subs.contains { element in
             if let s = element as? String { return s == uid }
             if let d = element as? [String: Any], let s = d[kAudioSubDeviceUIDKey] as? String {
@@ -310,14 +316,13 @@ enum MicaraAggregate {
             kAudioAggregateDeviceUIDKey: uid,
             kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: bhUID]],
             kAudioAggregateDeviceMasterSubDeviceKey: bhUID,
-            // IsPrivate=0 : visible par TOUTES les apps (Teams/Zoom) et pas
-            // seulement par le process créateur.
+            // IsPrivate=0: visible to EVERY app (Teams/Zoom) and not only to
+            // the process that created it.
             kAudioAggregateDeviceIsPrivateKey: 0,
-            // IsStacked=0 : les canaux des sous-devices ne sont pas empilés —
-            // avec un seul sous-device, l'agrégat expose les 16 canaux de
-            // BlackHole dans l'ordre (1↔1) : indispensable pour que le mix
-            // écrit sur les canaux 1-2 ressorte bien sur les canaux 1-2 côté
-            // entrée.
+            // IsStacked=0: the sub-devices' channels are not stacked — with a
+            // single sub-device the aggregate exposes BlackHole's 16 channels
+            // in order (1↔1), which is what makes the mix written on channels
+            // 1-2 come back out on channels 1-2 on the input side.
             kAudioAggregateDeviceIsStackedKey: 0,
         ]
         var device = AudioObjectID(kAudioObjectUnknown)
@@ -328,39 +333,40 @@ enum MicaraAggregate {
         return device
     }
 
-    /// Attend que coreaudiod ait publié (ou retiré) l'agrégat dans la liste
-    /// globale des devices. POURQUOI : `AudioHardwareCreate/DestroyAggregateDevice`
-    /// rend la main dès que coreaudiod a accusé réception, mais la propriété
-    /// `kAudioHardwarePropertyDevices` est mise à jour de façon asynchrone —
-    /// un `status()` immédiat pouvait renvoyer `present:false` juste après un
-    /// `ensure()`. Le helper C ne rencontrait pas le problème : il sortait du
-    /// process aussitôt après la création, la publication se faisant après sa
-    /// mort. Ici le process survit et interroge : il faut attendre.
+    /// Waits until coreaudiod has published (or withdrawn) the aggregate in the
+    /// global device list. WHY: `AudioHardwareCreate/DestroyAggregateDevice`
+    /// returns as soon as coreaudiod has acknowledged, but the
+    /// `kAudioHardwarePropertyDevices` property is updated asynchronously — an
+    /// immediate `status()` could report `present:false` right after an
+    /// `ensure()`. The C helper never hit this: it exited the process right
+    /// after creating, and publication happened after its death. Here the
+    /// process survives and asks: it has to wait.
     private static func waitForPublication(present expected: Bool, timeout: TimeInterval = 3) {
         let deadline = Date().addingTimeInterval(timeout)
         while (AudioDevices.find(uid: uid) != nil) != expected, Date() < deadline {
-            // 25 ms : assez court pour ne pas ralentir « Créer une réunion »,
-            // assez long pour ne pas marteler le HAL.
+            // 25 ms: short enough not to slow "Start a Meeting" down, long
+            // enough not to hammer the HAL.
             Thread.sleep(forTimeInterval: 0.025)
         }
     }
 
-    /// Idempotent : crée l'agrégat s'il manque, le répare s'il a perdu BlackHole,
-    /// ne touche jamais à un agrégat qui n'est pas le nôtre (identité = UID).
+    /// Idempotent: creates the aggregate when missing, repairs it when it has
+    /// lost BlackHole, and never touches an aggregate that is not ours
+    /// (identity = UID).
     @discardableResult
     static func ensure() throws -> Status {
         guard let blackHole = findBlackHole() else { throw AudioDeviceError.blackHoleMissing }
 
         if let existing = AudioDevices.find(uid: uid) {
             if hasSubDevice(existing.id, uid: blackHole.uid) {
-                return status()  // « kept » du C : rien à faire.
+                return status()  // the C's "kept": nothing to do.
             }
-            // Agrégat orphelin (BlackHole réinstallé sous un autre UID, ou
-            // agrégat créé avant le driver) : on le détruit et on le refait
-            // plutôt que de laisser un device muet dans la liste de Teams.
+            // Orphaned aggregate (BlackHole reinstalled under another UID, or
+            // an aggregate created before the driver): destroy and rebuild it
+            // rather than leave a mute device in the Teams list.
             let st = AudioHardwareDestroyAggregateDevice(existing.id)
             guard st == noErr else {
-                throw AudioDeviceError.osStatus(st, "AudioHardwareDestroyAggregateDevice (réparation)")
+                throw AudioDeviceError.osStatus(st, "AudioHardwareDestroyAggregateDevice (repair)")
             }
             waitForPublication(present: false)
         }
@@ -370,8 +376,8 @@ enum MicaraAggregate {
         return status()
     }
 
-    /// Détruit UNIQUEMENT l'agrégat portant notre UID. Absent = succès
-    /// silencieux (l'opération est idempotente, comme `remove` du C).
+    /// Destroys ONLY the aggregate carrying our UID. Absent = silent success
+    /// (the operation is idempotent, like the C's `remove`).
     static func remove() throws {
         guard let aggregate = AudioDevices.find(uid: uid) else { return }
         let status = AudioHardwareDestroyAggregateDevice(aggregate.id)
@@ -382,18 +388,18 @@ enum MicaraAggregate {
     }
 }
 
-// MARK: - Micro par défaut, avec restauration
+// MARK: - Default input, with restore
 
-/// Bascule du micro par défaut du système vers « Micara », et retour.
+/// Switches the system default microphone to "Micara", and back.
 ///
-/// Remplace `SwitchAudioSource` (`lib/mic-setup.js`) : plus de binaire tiers
-/// embarqué, plus de sélection par NOM (fragile : l'utilisateur peut renommer
-/// un device, et deux devices peuvent porter le même nom). Ici l'identité est
-/// l'UID de notre agrégat, exactement comme pour sa création.
+/// Replaces `SwitchAudioSource` (`lib/mic-setup.js`): no third-party binary to
+/// ship, and no picking by NAME (fragile: the user can rename a device, and two
+/// devices can carry the same name). Here the identity is our aggregate's UID,
+/// exactly as it is for its creation.
 ///
-/// L'UID mémorisé est persisté dans UserDefaults : si l'app meurt entre
-/// `activate()` et `restore()`, le prochain lancement peut encore rendre à
-/// l'utilisateur le micro qu'il avait avant Micara.
+/// The remembered UID is persisted in UserDefaults: if the app dies between
+/// `activate()` and `restore()`, the next launch can still hand the user back
+/// the microphone they had before Micara.
 final class DefaultInputSwitcher {
     private static let key = "previousInputUID"
     private let defaults: UserDefaults
@@ -402,11 +408,11 @@ final class DefaultInputSwitcher {
         self.defaults = defaults
     }
 
-    /// Mémorise le micro courant puis force « Micara ».
-    /// POURQUOI le garde-fou « sauf si c'est déjà Micara » : un double
-    /// `activate()` (réunion relancée sans `restore()`, ou reprise après crash)
-    /// écraserait la mémoire avec « Micara » et l'utilisateur ne retrouverait
-    /// jamais son micro.
+    /// Remembers the current microphone, then forces "Micara".
+    /// WHY the "unless it is already Micara" guard: a double `activate()` (a
+    /// meeting restarted without `restore()`, or a recovery after a crash)
+    /// would overwrite the memory with "Micara" and the user would never get
+    /// their microphone back.
     func activate() throws {
         let current = AudioDevices.defaultInputUID()
         if let current, current != MicaraAggregate.uid {
@@ -415,11 +421,12 @@ final class DefaultInputSwitcher {
         try AudioDevices.setDefaultInput(uid: MicaraAggregate.uid)
     }
 
-    /// Remet l'ancien micro s'il existe encore ; sinon laisse macOS choisir
-    /// (le système bascule tout seul quand le device par défaut disparaît —
-    /// forcer un autre device à sa place serait plus surprenant que de ne rien
-    /// faire). Ne lance jamais : `restore()` est appelé en fin de réunion et
-    /// dans les chemins d'erreur, il ne doit pas en créer un nouveau.
+    /// Puts the old microphone back if it still exists; otherwise lets macOS
+    /// choose (the system switches on its own when the default device
+    /// disappears — forcing another device in its place would be more
+    /// surprising than doing nothing). Never throws: `restore()` is called at
+    /// the end of a meeting and on the error paths, it must not create a new
+    /// error there.
     func restore() {
         defer { defaults.removeObject(forKey: Self.key) }
         guard let previous = defaults.string(forKey: Self.key),

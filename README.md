@@ -4,75 +4,74 @@
 
 <h1 align="center">Micara</h1>
 
-Les téléphones de la salle deviennent les micros de votre réunion Teams, Zoom
-ou Meet. Micara vit dans la barre de menus du Mac ; en réunion, un liseré bleu
-entoure l'écran et une petite barre en bas montre le son qui passe.
+The phones in the room become the microphones of your Teams, Zoom or Meet
+meeting. Micara lives in the Mac menu bar; during a meeting a blue border
+surrounds the screen and a small bar at the bottom shows the sound going
+through.
 
-## Installer
+## Install
 
 ```sh
 git clone https://github.com/GNRNicolas/micara-mac.git && cd micara-mac && ./build.sh --install
 ```
 
-Le script compile l'app, la pose dans `/Applications` et la lance. Il faut
-macOS 13 ou plus et les outils en ligne de commande Xcode
-(`xcode-select --install`). Une seule fois, il demande votre mot de passe :
-c'est pour installer **BlackHole**, le micro virtuel dans lequel Micara écrit.
-Un micro virtuel est un pilote système, aucune app ne peut le poser sans ça.
+That builds the app, puts it in `/Applications` and starts it. Needs macOS 13+
+and the Xcode command line tools (`xcode-select --install`). Once, it asks for
+your password: that is to install **BlackHole**, the virtual microphone Micara
+writes into. A virtual microphone is a system driver, and no app can put one in
+place without it.
 
-Micara s'ouvre ensuite au démarrage du Mac, sans fenêtre ni icône dans le Dock.
-Cherchez le micro dans la barre de menus, près de l'horloge.
+Micara then opens when the Mac starts, with no window and no Dock icon. Look
+for the microphone in the menu bar, near the clock.
 
-## Utiliser
+## Use
 
-1. Dans Teams, Zoom ou Meet, choisissez le micro **Micara**. Micara le règle
-   aussi comme micro par défaut du Mac pendant la réunion, et remet l'ancien à
-   la fin.
-2. Menu Micara → **Créer une réunion**. Le liseré bleu apparaît, la barre monte.
-3. Survolez la barre : un QR code se déploie. Chaque participant le scanne
-   avec son téléphone, autorise le micro, et c'est tout. Un point vert par
-   téléphone connecté ; orange s'il décroche, il disparaît s'il ne revient pas.
-4. **Couper** coupe tous les téléphones d'un coup, le micro du Mac continue.
-   **Terminer** ferme la réunion.
+1. In Teams, Zoom or Meet, pick the **Micara** microphone. Micara also sets it
+   as the Mac's default microphone for the duration of the meeting, and puts
+   the previous one back at the end.
+2. Micara menu → **Start a Meeting**. The blue border appears, the bar slides
+   up.
+3. Hover the bar: a QR code unfolds. Each participant scans it with their
+   phone, allows the microphone, and that is it. One green dot per connected
+   phone; orange if it drops, and it disappears if it does not come back.
+4. **Mute Phones** mutes every phone at once, the Mac's microphone keeps going.
+   **End the Meeting** closes it.
 
-Le code de l'espace est attribué à l'installation et ne change jamais : le QR
-est le même à chaque réunion. Pas de compte, pas de mot de passe.
+The space code is assigned at install time and never changes: the QR is the
+same at every meeting. No account, no password.
 
-## Mixage
+## Mixing
 
-Menu → **Mixage** :
+Menu → **Mixing**:
 
-| Mode | Comportement |
+| Mode | Behaviour |
 |---|---|
-| Dominance + gate (défaut) | Le téléphone le plus fort parle, les autres sont atténués de 18 dB. Un noise gate coupe les micros posés qui n'entendent que la salle. |
-| Somme | Tous les flux additionnés, un limiteur évite la saturation. |
+| Dominance + gate (default) | The loudest phone speaks, the others are ducked by 18 dB. A noise gate mutes the phones lying on the table that only hear the room. |
+| Sum | Every stream added together, with a limiter to avoid clipping. |
 
-Le micro du Mac est toujours dans le mix, avec l'annulation d'écho de macOS.
+The Mac's microphone is always in the mix, with the macOS echo cancellation.
 
 ## Permissions
 
-**Micro**, demandée à la première réunion : Micara capte le micro du Mac pour
-le mélanger aux téléphones. Rien d'autre. L'app est signée localement à
-chaque installation, macOS redemande donc cette autorisation après une mise à
-jour.
+**Microphone**, asked at the first meeting: Micara captures the Mac's
+microphone to mix it with the phones. Nothing else. The app is signed locally
+on every install, so macOS asks for that permission again after an update.
 
-## Mise à jour
+## Updates
 
-Une requête anonyme par jour vers GitHub. Quand une version sort, Micara le
-dit ; **Mettre à jour** relance `git pull && ./build.sh --install` et
-redémarre l'app.
+One anonymous request a day to GitHub. When a new version is out, Micara says
+so; **Update** re-runs `git pull && ./build.sh --install` and restarts the app.
 
-## Dépannage
+## Troubleshooting
 
-- Journal : `~/Library/Logs/micara.log`.
-- Le micro « Micara » a disparu des réglages audio : menu → **Réinstaller le
-  micro Micara**.
-- `kill -USR1 $(pgrep -x Micara)` démarre ou termine une réunion sans passer
-  par le menu.
+- Log: `~/Library/Logs/micara.log`.
+- The "Micara" microphone has vanished from the audio settings: menu →
+  **Reinstall the Micara Microphone**.
+- `kill -USR1 $(pgrep -x Micara)` starts or ends a meeting without the menu.
 
-[SPECS.md](SPECS.md) décrit l'architecture et les décisions.
+[SPECS.md](SPECS.md) covers the architecture and the decisions behind it.
 
-## Licences
+## Licenses
 
-Micara : MIT. BlackHole (Existential Audio) : GPL-3.0, installeur embarqué tel
-quel, texte de la licence dans l'app. LiveKit WebRTC : BSD.
+Micara: MIT. BlackHole (Existential Audio): GPL-3.0, installer bundled as is,
+license text inside the app. LiveKit WebRTC: BSD.

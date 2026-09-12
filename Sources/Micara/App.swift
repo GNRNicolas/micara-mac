@@ -1,36 +1,36 @@
 import AppKit
 import MicaraCore
 
-// MARK: - Réglages
+// MARK: - Settings
 
-/// Tout ce qui est persistant, avec sa clé. Le code d'espace et le jeton sont
-/// dans `Account`, pas ici.
+/// Everything persisted, with the key it is stored under. The space code and
+/// the token live in `Account`, not here.
 enum Settings {
     private static let store = UserDefaults.standard
 
-    /// Méthode de mixage choisie dans le menu, changeable en réunion.
+    /// Mixing method picked from the menu, changeable mid-meeting.
     static var mixMode: MixMode {
         get { MixMode(rawValue: store.string(forKey: "mixMode") ?? "") ?? .dominance }
         set { store.set(newValue.rawValue, forKey: "mixMode") }
     }
 
-    /// Chemin du checkout git d'où `build.sh --install` a été lancé. C'est là
-    /// que « Mettre à jour » relance `git pull && ./build.sh --install`.
+    /// Path of the git checkout `build.sh --install` was run from. That is
+    /// where **Update** re-runs `git pull && ./build.sh --install`.
     static var sourcePath: String? {
         get { store.string(forKey: "sourcePath") }
         set { store.set(newValue, forKey: "sourcePath") }
     }
 
-    /// Réunions démarrées, pour le menu.
+    /// Meetings started, for the menu.
     static var meetingsStarted: Int {
         get { store.integer(forKey: "meetingsStarted") }
         set { store.set(newValue, forKey: "meetingsStarted") }
     }
 }
 
-// MARK: - Journal
+// MARK: - Log
 
-/// `~/Library/Logs/micara.log`, en ajout, plafonné : l'app tourne des mois.
+/// `~/Library/Logs/micara.log`, appended, capped: the app runs for months.
 enum AppLog {
     private static let url = FileManager.default
         .homeDirectoryForCurrentUser

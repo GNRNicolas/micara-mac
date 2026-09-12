@@ -1,6 +1,6 @@
-// JSON littéraux copiés des formes réellement émises par `server/signal.js` et
-// `bridge/renderer/src/engine.js` : c'est le contrat qu'on ne peut pas dévier
-// sans casser la négociation WebRTC en silence.
+// Literal JSON copied from the shapes `server/signal.js` and
+// `bridge/renderer/src/engine.js` really emit: this is the contract you cannot
+// drift from without breaking WebRTC negotiation silently.
 
 import Foundation
 import Testing
@@ -10,16 +10,16 @@ private func decode(_ json: String) throws -> IncomingMessage {
     try IncomingMessage.decode(Data(json.utf8))
 }
 
-@Suite("Serveur → bridge")
+@Suite("Server → bridge")
 struct IncomingMessageTests {
-    @Test func welcomeAvecIceServersEnTableau() throws {
+    @Test func welcomeWithIceServersAsAnArray() throws {
         let json = """
         {"type":"welcome","role":"bridge","space":{"secretCode":"aB3xY7"},"iceServers":[
           {"urls":["turn:turn.cloudflare.com:3478?transport=udp","turn:turn.cloudflare.com:3478?transport=tcp"],
            "username":"u123","credential":"c456"}]}
         """
         guard case let .welcome(code, servers) = try decode(json) else {
-            Issue.record("welcome attendu"); return
+            Issue.record("expected welcome"); return
         }
         #expect(code == "aB3xY7")
         #expect(servers == [IceServer(
@@ -27,21 +27,21 @@ struct IncomingMessageTests {
             username: "u123", credential: "c456")])
     }
 
-    @Test func welcomeAvecUrlsEnChaineEtSansCredentials() throws {
+    @Test func welcomeWithUrlsAsAStringAndNoCredentials() throws {
         let json = #"{"type":"welcome","role":"bridge","space":{"secretCode":"ABCDEF"},"iceServers":[{"urls":"stun:stun.l.google.com:19302"}]}"#
         #expect(try decode(json) == .welcome(
             secretCode: "ABCDEF",
             iceServers: [IceServer(urls: ["stun:stun.l.google.com:19302"])]))
     }
 
-    @Test func welcomeSansTurnConfigure() throws {
-        // `server/turn.js` renvoie [] quand TURN_KEY_ID n'est pas configuré.
+    @Test func welcomeWithNoTurnConfigured() throws {
+        // `server/turn.js` returns [] when TURN_KEY_ID is not configured.
         let json = #"{"type":"welcome","role":"bridge","space":{"secretCode":"ABCDEF"},"iceServers":[]}"#
         #expect(try decode(json) == .welcome(secretCode: "ABCDEF", iceServers: []))
     }
 
-    @Test func phoneJoinedIgnoreLActeur() throws {
-        // `actor` existe encore côté serveur ; la réécriture ne l'affiche plus.
+    @Test func phoneJoinedIgnoresTheActor() throws {
+        // `actor` still exists server-side; the rewrite no longer displays it.
         #expect(try decode(#"{"type":"phone-joined","phoneId":"A1B2","actor":"Renard"}"#)
             == .phoneJoined(phoneId: "A1B2"))
     }
@@ -52,15 +52,15 @@ struct IncomingMessageTests {
 
     @Test func offer() throws {
         let json = #"{"type":"offer","sdp":{"type":"offer","sdp":"v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"},"phoneId":"A1B2","actor":"Renard"}"#
-        guard case let .offer(phoneId, sdp) = try decode(json) else { Issue.record("offer attendu"); return }
+        guard case let .offer(phoneId, sdp) = try decode(json) else { Issue.record("expected offer"); return }
         #expect(phoneId == "A1B2")
         #expect(sdp.type == "offer")
         #expect(sdp.sdp.hasPrefix("v=0"))
     }
 
-    @Test func offerAvecSdpEnChaineNue() throws {
+    @Test func offerWithABareStringSdp() throws {
         let json = #"{"type":"offer","sdp":"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n","phoneId":"A1B2"}"#
-        guard case let .offer(_, sdp) = try decode(json) else { Issue.record("offer attendu"); return }
+        guard case let .offer(_, sdp) = try decode(json) else { Issue.record("expected offer"); return }
         #expect(sdp.type == "offer")
         #expect(sdp.sdp.hasPrefix("v=0"))
     }
@@ -73,25 +73,25 @@ struct IncomingMessageTests {
                                     sdpMid: "0", sdpMLineIndex: 0)))
     }
 
-    @Test func iceSansSdpMid() throws {
+    @Test func iceWithoutSdpMid() throws {
         let json = #"{"type":"ice","candidate":{"candidate":"candidate:2 1 udp 1 10.0.0.1 1 typ srflx"},"phoneId":"A1B2"}"#
         #expect(try decode(json) == .ice(
             phoneId: "A1B2",
             candidate: IceCandidate(candidate: "candidate:2 1 udp 1 10.0.0.1 1 typ srflx")))
     }
 
-    @Test func typeInconnuNeFaitPasEchouerLeDecodage() throws {
+    @Test func anUnknownTypeDoesNotFailDecoding() throws {
         #expect(try decode(#"{"type":"bridge-status","connected":true}"#) == .unknown(type: "bridge-status"))
-        #expect(try decode(#"{"type":"quelque-chose-de-neuf","x":[1,2,3]}"#) == .unknown(type: "quelque-chose-de-neuf"))
+        #expect(try decode(#"{"type":"something-brand-new","x":[1,2,3]}"#) == .unknown(type: "something-brand-new"))
     }
 
-    @Test func messageConnuMaisAmputeDevientUnknownPlutotQueDeJeter() throws {
+    @Test func aKnownButTruncatedMessageBecomesUnknownRatherThanThrowing() throws {
         #expect(try decode(#"{"type":"phone-joined"}"#) == .unknown(type: "phone-joined"))
         #expect(try decode(#"{"type":"ice","phoneId":"A1B2"}"#) == .unknown(type: "ice"))
     }
 }
 
-@Suite("Bridge → serveur")
+@Suite("Bridge → server")
 struct OutgoingMessageTests {
     private func fields(_ m: OutgoingMessage) throws -> [String: Any] {
         (try JSONSerialization.jsonObject(with: m.encode())) as? [String: Any] ?? [:]
@@ -104,7 +104,7 @@ struct OutgoingMessageTests {
         let sdp = f["sdp"] as? [String: Any]
         #expect(sdp?["type"] as? String == "answer")
         #expect(sdp?["sdp"] as? String == "v=0\r\n")
-        // Pas de clé parasite : le serveur relaie l'objet tel quel au téléphone.
+        // No stray key: the server relays the object as-is to the phone.
         #expect(f["candidate"] == nil)
         #expect(f["live"] == nil)
     }
@@ -129,28 +129,28 @@ struct OutgoingMessageTests {
         #expect(f["live"] as? Bool == false)
     }
 
-    // Aller-retour : ce que le bridge émet, le bridge sait le relire — c'est
-    // exactement l'objet que le serveur relaie au téléphone (`{...msg, from}`).
-    @Test func allerRetourIce() throws {
+    // Round trip: what the bridge emits, the bridge can read back — it is
+    // exactly the object the server relays to the phone (`{...msg, from}`).
+    @Test func iceRoundTrip() throws {
         let cand = IceCandidate(candidate: "candidate:1 1 udp 1 1.2.3.4 1 typ host", sdpMid: "0", sdpMLineIndex: 0)
         guard case let .ice(pid, back) = try IncomingMessage.decode(
             OutgoingMessage.ice(phoneId: "A1B2", candidate: cand).encode()) else {
-            Issue.record("ice attendu"); return
+            Issue.record("expected ice"); return
         }
         #expect(pid == "A1B2")
         #expect(back == cand)
     }
 
-    @Test func allerRetourSessionDescription() throws {
+    @Test func sessionDescriptionRoundTrip() throws {
         let sdp = SessionDescription(type: "answer", sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n")
         let data = try JSONEncoder().encode(sdp)
         #expect(try JSONDecoder().decode(SessionDescription.self, from: data) == sdp)
     }
 }
 
-@Suite("Codes de fermeture")
+@Suite("Close codes")
 struct CloseCodeTests {
-    @Test func tableDuReadme() {
+    @Test func readmeTable() {
         #expect(CloseCode.missingParam == 4000)
         #expect(CloseCode.invalidToken == 4001)
         #expect(CloseCode.spaceNotFound == 4002)
@@ -160,10 +160,10 @@ struct CloseCodeTests {
         #expect(CloseCode.accountDisabled == 4006)
         #expect(CloseCode.adminDisconnect == 4007)
         #expect(CloseCode.spaceFull == 4008)
-        #expect(CloseCode.describe(4001) == "jeton invalide")
-        #expect(CloseCode.describe(4008) == "espace plein")
-        #expect(CloseCode.describe(4010) == "réunion terminée")
-        // Un code WebSocket standard n'est pas du ressort de Micara.
+        #expect(CloseCode.describe(4001) == "invalid token")
+        #expect(CloseCode.describe(4008) == "space full")
+        #expect(CloseCode.describe(4010) == "meeting ended")
+        // A standard WebSocket code is none of Micara's business.
         #expect(CloseCode.describe(1006) == nil)
     }
 }

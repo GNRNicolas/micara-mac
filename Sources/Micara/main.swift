@@ -2,12 +2,13 @@ import AppKit
 import ServiceManagement
 import MicaraCore
 
-// Micara pour Mac — l'ordinateur et les téléphones de la salle fusionnent leur
-// audio dans un seul micro « Micara » que Teams/Zoom voient comme un micro
-// ordinaire. Forme empruntée à Eyesaver : menu bar, pas de Dock, une barre
-// non-activante en bas de l'écran, un liseré autour de chaque écran.
+// Micara for Mac — the computer and the phones in the room merge their audio
+// into a single "Micara" microphone that Teams/Zoom see as an ordinary one.
+// Shape borrowed from Eyesaver: menu bar, no Dock, a non-activating bar at the
+// bottom of the screen, a border around every display.
 //
-// Cycle : `idle` ⇄ `meeting`. Tout passe par `startMeeting()` et `endMeeting()`.
+// Cycle: `idle` ⇄ `meeting`. Everything goes through `startMeeting()` and
+// `endMeeting()`.
 
 final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
     private var statusItem: NSStatusItem!
@@ -24,21 +25,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
     private var phase: Phase = .idle
     private var muted = false
 
-    private let meetingItem = NSMenuItem(title: "Créer une réunion", action: #selector(toggleMeeting), keyEquivalent: "")
-    private let muteItem = NSMenuItem(title: "Couper les téléphones", action: #selector(toggleMute), keyEquivalent: "")
-    private let loginItem = NSMenuItem(title: "Ouvrir au démarrage", action: #selector(toggleOpenAtLogin), keyEquivalent: "")
-    private let micItem = NSMenuItem(title: "Réinstaller le micro Micara", action: #selector(reinstallMic), keyEquivalent: "")
+    private let meetingItem = NSMenuItem(title: "Start a Meeting", action: #selector(toggleMeeting), keyEquivalent: "")
+    private let muteItem = NSMenuItem(title: "Mute Phones", action: #selector(toggleMute), keyEquivalent: "")
+    private let loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleOpenAtLogin), keyEquivalent: "")
+    private let micItem = NSMenuItem(title: "Reinstall the Micara Microphone", action: #selector(reinstallMic), keyEquivalent: "")
     private let codeItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        AppLog.write("--- lancement \(Updater.currentVersion) ---")
+        AppLog.write("--- launch \(Updater.currentVersion) ---")
         guard !quitIfAlreadyRunning() else { return }
         buildMenu()
         installTestHooks()
         register()
 
-        // Ouvrir au démarrage d'office à la première installation : l'app est
-        // conçue pour être oubliée dans la barre de menus. Désactivable au menu.
+        // Open at Login on by default on first install: the app is meant to be
+        // forgotten in the menu bar. Switchable from the menu.
         if !UserDefaults.standard.bool(forKey: "loginItemOffered") {
             UserDefaults.standard.set(true, forKey: "loginItemOffered")
             try? SMAppService.mainApp.register()
@@ -55,22 +56,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Quitter en réunion ne doit pas laisser Teams sur un micro fantôme.
+        // Quitting mid-meeting must not leave Teams on a ghost microphone.
         if phase == .meeting { endMeeting() }
     }
 
-    /// Deux copies = deux icônes, deux barres, un micro forcé deux fois.
+    /// Two copies = two icons, two bars, and the microphone forced twice.
     private func quitIfAlreadyRunning() -> Bool {
         let identifier = Bundle.main.bundleIdentifier ?? ""
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: identifier).filter { $0 != .current }
         guard let first = others.first else { return false }
-        AppLog.write("déjà lancé (pid \(first.processIdentifier)) ; cette copie quitte")
+        AppLog.write("already running (pid \(first.processIdentifier)); this copy quits")
         NSApp.terminate(nil)
         return true
     }
 
-    /// `kill -USR1 <pid>` démarre/termine une réunion : boucle de test sans
-    /// passer par le menu.
+    /// `kill -USR1 <pid>` starts/ends a meeting: a test loop without going
+    /// through the menu.
     private func installTestHooks() {
         Darwin.signal(SIGUSR1, SIG_IGN)
         let source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
@@ -79,21 +80,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
         signalSources.append(source)
     }
 
-    // MARK: Enregistrement
+    // MARK: Registration
 
     private func register() {
         Account.ensureRegistered { [weak self] result in
             switch result {
             case .success: self?.refreshMenuState()
             case .failure(let error):
-                AppLog.write("enregistrement : \(error.localizedDescription)")
-                // Réessai discret : le Mac vient peut-être de se réveiller sans réseau.
+                AppLog.write("registration: \(error.localizedDescription)")
+                // Quiet retry: the Mac may have just woken up without network.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 60) { self?.register() }
             }
         }
     }
 
-    // MARK: Barre de menus
+    // MARK: Menu bar
 
     private func buildMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -106,37 +107,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
         menu.addItem(muteItem)
         menu.addItem(.separator())
         menu.addItem(codeItem)
-        menu.addItem(choiceMenu("Mixage", choices: [("Dominance + gate", 0), ("Somme", 1)],
+        menu.addItem(choiceMenu("Mixing", choices: [("Dominance + gate", 0), ("Sum", 1)],
                                 selected: Settings.mixMode == .dominance ? 0 : 1, action: #selector(pickMixMode(_:))))
         menu.addItem(loginItem)
         menu.addItem(micItem)
         menu.addItem(.separator())
-        menu.addItem(menuItem("Vérifier les mises à jour…", #selector(checkForUpdates)))
-        menu.addItem(menuItem("Partager Micara", #selector(shareApp)))
+        menu.addItem(menuItem("Check for Updates…", #selector(checkForUpdates)))
+        menu.addItem(menuItem("Share Micara", #selector(shareApp)))
         menu.addItem(menuItem("Star on GitHub", #selector(openRepository)))
         menu.addItem(.separator())
         menu.items.forEach { if $0.action != nil { $0.target = self } }
-        menu.addItem(NSMenuItem(title: "Quitter Micara", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit Micara", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         menu.delegate = self
         statusItem.menu = menu
         refreshMenuState()
     }
 
-    /// Le logo Micara (la grille de points du SVG de la marque) dessiné en
-    /// image *template* : macOS le teinte lui-même selon la barre de menus
-    /// (clair, sombre, fond d'écran vif). Un PNG gris fixe restait gris
-    /// partout, illisible sur une barre claire.
+    /// The Micara logo (the dot grid from the brand SVG) drawn as a *template*
+    /// image: macOS tints it itself to match the menu bar (light, dark, vivid
+    /// wallpaper). A fixed grey PNG stayed grey everywhere, unreadable on a
+    /// light bar.
     private func statusImage() -> NSImage {
         let side: CGFloat = 18
         let image = NSImage(size: NSSize(width: side, height: side), flipped: true) { rect in
-            // Coordonnées du logo.svg (viewBox 64), rayon 3.44.
+            // Coordinates from logo.svg (viewBox 64), radius 3.44.
             let dots: [(CGFloat, CGFloat)] = [
                 (22.29, 17.60), (41.08, 17.60), (31.69, 26.99), (13.52, 36.38), (13.52, 46.40),
                 (13.52, 26.99), (22.29, 26.99), (41.08, 26.99), (50.48, 26.99), (50.48, 36.38),
                 (50.48, 46.40), (31.69, 37.01),
             ]
             let scale = rect.width / 64
-            let r = 3.44 * scale * 1.15  // un peu plus gras : 18 pt, pas 64
+            let r = 3.44 * scale * 1.15  // a touch bolder: 18 pt, not 64
             NSColor.black.setFill()
             for (x, y) in dots {
                 NSBezierPath(ovalIn: NSRect(x: x * scale - r, y: y * scale - r, width: 2 * r, height: 2 * r)).fill()
@@ -167,16 +168,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
 
     private func refreshMenuState() {
         let inMeeting = phase == .meeting
-        meetingItem.title = inMeeting ? "Terminer la réunion" : "Créer une réunion"
+        meetingItem.title = inMeeting ? "End the Meeting" : "Start a Meeting"
         meetingItem.isEnabled = Account.isRegistered || inMeeting
         muteItem.isEnabled = inMeeting
-        muteItem.title = muted ? "Réactiver les téléphones" : "Couper les téléphones"
-        codeItem.title = Account.code.map { "Code de l'espace : \($0)" } ?? "Enregistrement en cours…"
+        muteItem.title = muted ? "Unmute Phones" : "Mute Phones"
+        codeItem.title = Account.code.map { "Space code: \($0)" } ?? "Registering…"
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        micItem.title = MicaraAggregate.blackHoleInstalled ? "Réinstaller le micro Micara" : "Installer le micro Micara…"
+        micItem.title = MicaraAggregate.blackHoleInstalled ? "Reinstall the Micara Microphone" : "Install the Micara Microphone…"
     }
 
-    // MARK: Actions du menu
+    // MARK: Menu actions
 
     @objc private func toggleMeeting() {
         switch phase {
@@ -190,7 +191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
         audio?.phonesMuted = muted
         bar.setMuted(muted)
         refreshMenuState()
-        AppLog.write(muted ? "téléphones coupés" : "téléphones réactivés")
+        AppLog.write(muted ? "phones muted" : "phones unmuted")
     }
 
     @objc private func pickMixMode(_ sender: NSMenuItem) {
@@ -204,26 +205,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
             if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
             else { try SMAppService.mainApp.register() }
         } catch {
-            AppLog.write("ouvrir au démarrage : \(error.localizedDescription)")
+            AppLog.write("open at login: \(error.localizedDescription)")
         }
         refreshMenuState()
     }
 
-    /// BlackHole est un driver système : seul son installeur (mot de passe
-    /// admin) peut le poser. On ouvre le .pkg embarqué dans Installer.app.
+    /// BlackHole is a system driver: only its installer (admin password) can
+    /// put it in place. Open the bundled .pkg in Installer.app.
     @objc private func reinstallMic() {
         if MicaraAggregate.blackHoleInstalled {
             do {
                 try MicaraAggregate.remove()
                 try MicaraAggregate.ensure()
-                AppLog.write("agrégat Micara recréé")
+                AppLog.write("Micara aggregate recreated")
             } catch {
-                alert("Micro Micara", "Impossible de recréer le micro : \(error)")
+                alert("Micara Microphone", "Could not recreate the microphone: \(error)")
             }
             return
         }
         guard let pkg = Bundle.main.url(forResource: "BlackHole16ch-0.7.1", withExtension: "pkg") else {
-            alert("Micro Micara", "L'installeur BlackHole manque dans l'app. Relancez ./build.sh --install depuis le Terminal.")
+            alert("Micara Microphone", "The BlackHole installer is missing from the app. Run ./build.sh --install again from the Terminal.")
             return
         }
         NSWorkspace.shared.open(pkg)
@@ -249,25 +250,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
         alert.runModal()
     }
 
-    // MARK: Réunion
+    // MARK: Meeting
 
     private func startMeeting() {
         guard phase == .idle, let token = Account.token, let joinURL = Account.joinURL else { return }
 
-        // 1. Le micro « Micara » (agrégat autour de BlackHole) existe et devient
-        //    le micro par défaut. Sans BlackHole, rien ne peut marcher.
+        // 1. The "Micara" microphone (an aggregate around BlackHole) exists and
+        //    becomes the default input. Without BlackHole, nothing can work.
         do {
             try MicaraAggregate.ensure()
             try inputSwitcher.activate()
         } catch AudioDeviceError.blackHoleMissing {
-            alert("Micro Micara absent", "BlackHole n'est pas installé. Menu → « Installer le micro Micara… », puis réessayez.")
+            alert("Micara Microphone Missing", "BlackHole is not installed. Menu → \"Install the Micara Microphone…\", then try again.")
             return
         } catch {
-            alert("Micro Micara", "Impossible de préparer le micro : \(error)")
+            alert("Micara Microphone", "Could not prepare the microphone: \(error)")
             return
         }
 
-        // 2. Moteur audio : micro du Mac + téléphones → BlackHole.
+        // 2. Audio engine: the Mac's microphone + the phones → BlackHole.
         let engine = AudioEngine()
         engine.mode = Settings.mixMode
         engine.phonesMuted = muted
@@ -276,19 +277,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
             try engine.start(outputDeviceUID: MicaraAggregate.blackHoleUID)
         } catch {
             inputSwitcher.restore()
-            alert("Audio", "Impossible de démarrer le moteur audio : \(error)")
+            alert("Audio", "Could not start the audio engine: \(error)")
             return
         }
         audio = engine
 
-        // 3. Signal : les téléphones se connectent par le code du QR.
+        // 3. Signal: phones join through the code in the QR.
         let client = SignalClient(config: SignalConfig(serverURL: Account.serverURL, token: token), audio: engine)
         client.onPhones = { [weak self] dots in self?.bar.setPhones(dots) }
         client.onState = { [weak self] state in self?.signalDidChange(state) }
         client.connect()
         signal = client
 
-        // 4. Ce qui se voit.
+        // 4. What is visible.
         phase = .meeting
         Settings.meetingsStarted += 1
         bar.setJoinURL(joinURL)
@@ -299,7 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in Account.heartbeat(state: "active") }
         Account.heartbeat(state: "active")
         refreshMenuState()
-        AppLog.write("réunion démarrée")
+        AppLog.write("meeting started")
     }
 
     private func endMeeting() {
@@ -310,31 +311,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
         audio?.stop(); audio = nil
         bar.hide()
         borders.hide()
-        // Le micro par défaut revient à ce qu'il était : l'utilisateur retrouve
-        // son Mac tel qu'il l'a laissé.
+        // The default microphone goes back to what it was: the user finds the
+        // Mac as they left it.
         inputSwitcher.restore()
         Account.heartbeat(state: "sleep")
         refreshMenuState()
-        AppLog.write("réunion terminée")
+        AppLog.write("meeting ended")
     }
 
     private func signalDidChange(_ state: SignalClient.State) {
         switch state {
-        case .connecting: AppLog.write("signal : connexion…")
-        case .connected: AppLog.write("signal : connecté")
+        case .connecting: AppLog.write("signal: connecting…")
+        case .connected: AppLog.write("signal: connected")
         case .disconnected(let code, let reason):
-            AppLog.write("signal : déconnecté \(code.map(String.init) ?? "-") \(reason ?? "")")
+            AppLog.write("signal: disconnected \(code.map(String.init) ?? "-") \(reason ?? "")")
             if let code, let text = CloseCode.describe(code), [4001, 4003, 4005, 4006, 4007].contains(code) {
-                // Fatal : le jeton ou l'espace ne valent plus rien. On termine
-                // la réunion proprement plutôt que de laisser un micro muet.
+                // Fatal: the token or the space is worthless now. End the
+                // meeting cleanly rather than leave a mute microphone behind.
                 endMeeting()
                 if code == 4001 {
-                    // Jeton révoqué côté serveur : on repart de zéro à la prochaine réunion.
+                    // Token revoked server-side: start over at the next meeting.
                     Account.token = nil
                     Account.code = nil
                     register()
                 }
-                alert("Réunion interrompue", text)
+                alert("Meeting Interrupted", text)
             }
         }
     }

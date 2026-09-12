@@ -4,15 +4,14 @@ import QuartzCore
 
 import MicaraCore
 
-// MARK: - Fond du pill
+// MARK: - Pill background
 
-/// Matériau translucide réellement découpé en coins arrondis.
+/// Translucent material actually clipped to rounded corners.
 ///
-/// `layer.cornerRadius` ne suffit pas : en mélange `.behindWindow`, le flou est
-/// composité par le serveur de fenêtres sur tout le rectangle de la vue et
-/// ignore le masque de calque — d'où la boîte visible autour du pill.
-/// `maskImage` est le seul découpage que la composition respecte, et l'ombre de
-/// la fenêtre le suit.
+/// `layer.cornerRadius` is not enough: in `.behindWindow` blending the blur is
+/// composited by the window server across the view's whole rectangle and
+/// ignores the layer mask — hence the visible box around the pill. `maskImage`
+/// is the only clip compositing respects, and the window shadow follows it.
 class PillBackground: NSVisualEffectView {
     private let outline = CAShapeLayer()
 
@@ -33,8 +32,8 @@ class PillBackground: NSVisualEffectView {
 
     override func layout() {
         super.layout()
-        // Le filet fin doit être un `CAShapeLayer` à part : `layer.borderWidth`
-        // resterait rectangulaire, le masque ne s'y applique pas.
+        // The hairline must be its own `CAShapeLayer`: `layer.borderWidth`
+        // would stay rectangular, the mask does not apply to it.
         outline.frame = bounds
         outline.path = CGPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
                               cornerWidth: Style.pillRadius,
@@ -42,11 +41,11 @@ class PillBackground: NSVisualEffectView {
                               transform: nil)
     }
 
-    /// Image étirable : les quatre coins sont préservés, le centre s'étire.
+    /// Stretchable image: the four corners are preserved, the centre stretches.
     private static func mask(radius: CGFloat) -> NSImage {
         let side = radius * 2 + 1
         let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
-            // Le noir est ici une opacité, pas une couleur : c'est un masque.
+            // Black here is an opacity, not a colour: this is a mask.
             NSColor.black.setFill()
             NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
             return true
@@ -57,8 +56,8 @@ class PillBackground: NSVisualEffectView {
     }
 }
 
-/// Une vue de fond qui sait dire quand la souris entre et sort. Sert au
-/// panneau QR : sans ça, aller de l'icône au panneau le replierait.
+/// A background view that reports when the mouse enters and leaves. Used by
+/// the QR panel: without it, moving from the icon to the panel would fold it.
 private final class HoverPanelView: PillBackground {
     var onHoverChange: ((Bool) -> Void)?
 
@@ -74,20 +73,20 @@ private final class HoverPanelView: PillBackground {
     override func mouseExited(with event: NSEvent) { onHoverChange?(false) }
 }
 
-// MARK: - Bouton du pill
+// MARK: - Pill button
 
-/// Capsule du pill. Deux styles, ceux d'Eyesaver : principal (aplat `ink`,
-/// texte `night`) et secondaire (encre translucide). Aucune autre couleur.
+/// Pill capsule. Two styles, Eyesaver's: prominent (`ink` fill, `night` text)
+/// and secondary (translucent ink). No other colour.
 final class PillButton: NSButton {
-    /// Tous les libellés que ce bouton pourra porter. La largeur est celle du
-    /// plus long : un bouton qui change de texte ne doit pas changer de taille,
-    /// sinon tout le pill respire à chaque mute et l'œil suit le mouvement.
+    /// Every label this button may ever carry. Its width is the width of the
+    /// longest one: a button that changes text must not change size, otherwise
+    /// the whole pill breathes on every mute and the eye follows the movement.
     private let candidates: [String]
     private var label: String
     private let prominent: Bool
     private var hovered = false
-    /// Marque le bouton secondaire quand le micro est coupé. En encre, pas en
-    /// couleur : la barre n'a pas de teinte à elle.
+    /// Marks the secondary button when the mic is muted. In ink, not in colour:
+    /// the bar has no hue of its own.
     var tinted = false { didSet { attributedTitle = makeTitle(); paint() } }
 
     init(labels: [String], prominent: Bool, target: AnyObject, action: Selector) {
@@ -124,7 +123,7 @@ final class PillButton: NSButton {
         ])
     }
 
-    /// Largeur figée une fois pour toutes, sur le plus long libellé possible.
+    /// Width frozen once and for all, on the longest possible label.
     override var intrinsicContentSize: NSSize {
         let widest = candidates
             .map { NSAttributedString(string: $0, attributes: [.font: PillButton.font]).size().width }
@@ -160,10 +159,10 @@ final class PillButton: NSButton {
     override func mouseExited(with event: NSEvent) { hovered = false; paint() }
 }
 
-// MARK: - Icône QR
+// MARK: - QR icon
 
-/// L'icône qui déplie le QR : survol pour un coup d'œil, clic pour l'épingler
-/// le temps que les gens rejoignent.
+/// The icon that unfolds the QR: hover for a glance, click to pin it while
+/// people join.
 private final class QRToggle: NSImageView {
     var onHoverChange: ((Bool) -> Void)?
     var onClick: (() -> Void)?
@@ -173,7 +172,7 @@ private final class QRToggle: NSImageView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        image = NSImage(systemSymbolName: "qrcode", accessibilityDescription: "QR de la réunion")?
+        image = NSImage(systemSymbolName: "qrcode", accessibilityDescription: "Meeting QR code")?
             .withSymbolConfiguration(.init(pointSize: 15, weight: .regular))
         imageScaling = .scaleNone
         paint()
@@ -190,8 +189,8 @@ private final class QRToggle: NSImageView {
         contentTintColor = Style.ink.withAlphaComponent(alpha)
     }
 
-    // L'app n'est jamais active : sans ça, le premier clic serait consommé
-    // pour la « réveiller » et n'épinglerait rien.
+    // The app is never active: without this, the first click would be spent
+    // "waking it up" and would pin nothing.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) { onClick?() }
@@ -217,10 +216,10 @@ private final class QRToggle: NSImageView {
     }
 }
 
-// MARK: - Vu-mètre
+// MARK: - Level meter
 
-/// Jauge horizontale continue, en encre. Le lissage se fait en amont
-/// (`Bar.tick`) : la vue ne fait que dessiner la valeur qu'on lui donne.
+/// Continuous horizontal gauge, in ink. Smoothing happens upstream
+/// (`Bar.tick`): the view only draws the value it is handed.
 private final class LevelMeter: NSView {
     var level: CGFloat = 0 { didSet { if level != oldValue { needsDisplay = true } } }
     var dimmed = false { didSet { needsDisplay = true } }
@@ -237,8 +236,8 @@ private final class LevelMeter: NSView {
         NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
 
         guard level > 0.001 else { return }
-        // Largeur minimale = la hauteur : en dessous, la capsule dégénère en
-        // demi-cercle écrasé et le témoin « ça capte » disparaît.
+        // Minimum width = the height: below that the capsule degenerates into
+        // a squashed half-circle and the "it's picking up" cue disappears.
         let width = max(bounds.height, bounds.width * min(1, level))
         let fill = NSRect(x: 0, y: 0, width: width, height: bounds.height)
         Style.ink.withAlphaComponent(dimmed ? 0.25 : 0.9).setFill()
@@ -246,14 +245,13 @@ private final class LevelMeter: NSView {
     }
 }
 
-// MARK: - Points téléphones
+// MARK: - Phone dots
 
-/// Un cercle par téléphone, apparition et disparition animées.
+/// One circle per phone, with animated appearance and disappearance.
 ///
-/// La largeur est celle de `Style.maxPhones` points, TOUJOURS, même à zéro
-/// téléphone : les points se remplissent dans une zone réservée au lieu de
-/// pousser les boutons. Une barre qui s'élargit à chaque arrivée est une barre
-/// qu'on regarde bouger au lieu de travailler.
+/// The width is that of `Style.maxPhones` dots, ALWAYS, even with zero phones:
+/// the dots fill a reserved area instead of pushing the buttons along. A bar
+/// that widens on every arrival is a bar you watch move instead of working.
 private final class PhoneDotsView: NSView {
     private var order: [String] = []
     private var layers: [String: CALayer] = [:]
@@ -282,9 +280,9 @@ private final class PhoneDotsView: NSView {
             let circle = layers[dot.id] ?? makeCircle(id: dot.id)
             circle.backgroundColor = color(for: dot.state).cgColor
         }
-        // Les téléphones partis s'effacent avant d'être retirés. Le retrait est
-        // différé plutôt que posé en bloc de complétion : un seul bloc survit
-        // par transaction, et plusieurs points peuvent partir ensemble.
+        // Departed phones fade out before being removed. The removal is
+        // deferred rather than put in a completion block: only one block
+        // survives per transaction, and several dots can leave together.
         for (id, circle) in layers where !order.contains(id) {
             layers.removeValue(forKey: id)
             circle.opacity = 0
@@ -313,9 +311,9 @@ private final class PhoneDotsView: NSView {
         circle.transform = CATransform3DMakeScale(0.2, 0.2, 1)
         layer?.addSublayer(circle)
         layers[id] = circle
-        // Le calque doit d'abord exister à l'état caché : animer dans la foulée
-        // de sa création ne produirait rien, il n'y a pas encore d'ancienne
-        // valeur d'où partir.
+        // The layer must first exist in its hidden state: animating right
+        // after creating it would produce nothing, there is no previous value
+        // to start from yet.
         DispatchQueue.main.async {
             CATransaction.begin()
             CATransaction.setAnimationDuration(Style.appearDuration)
@@ -342,15 +340,15 @@ private final class PhoneDotsView: NSView {
 
 // MARK: - QR code
 
-/// QR dessiné module par module, en encre sur le matériau du pill.
+/// QR drawn module by module, in ink on the pill's material.
 ///
-/// L'image brute de `CIQRCodeGenerator` est écartée : elle a un fond blanc et
-/// des modules carrés, et son agrandissement bave. On lit la matrice (rendu à
-/// 1 px par module, en niveaux de gris) puis on dessine chaque module comme un
-/// carré à coins arrondis, sur une grille d'entiers pour rester net.
+/// The raw `CIQRCodeGenerator` image is discarded: it has a white background
+/// and square modules, and it smears when enlarged. We read the matrix instead
+/// (rendered at 1 px per module, in greyscale) and draw each module as a
+/// rounded square, on an integer grid so it stays crisp.
 private final class QRCodeView: NSView {
     private var modules: [[Bool]] = []
-    /// Côté effectif, multiple entier du module. 0 tant qu'il n'y a pas d'URL.
+    /// Effective side, a whole multiple of the module. 0 until there is a URL.
     private(set) var side: CGFloat = Style.qrTargetSide
 
     override var isFlipped: Bool { true }
@@ -359,7 +357,7 @@ private final class QRCodeView: NSView {
     func setURL(_ url: URL) {
         modules = QRCodeView.matrix(for: url)
         let count = CGFloat(modules.count)
-        // Un module entier, sinon les arrondis tombent entre deux pixels.
+        // A whole module, otherwise the rounded corners land between pixels.
         let unit = count > 0 ? max(1, (Style.qrTargetSide / count).rounded(.down)) : 0
         side = count > 0 ? unit * count : Style.qrTargetSide
         invalidateIntrinsicContentSize()
@@ -382,10 +380,10 @@ private final class QRCodeView: NSView {
                                   y: origin.y + CGFloat(row) * unit,
                                   width: unit, height: unit)
                 path.append(NSBezierPath(roundedRect: cell, xRadius: radius, yRadius: radius))
-                // Deux modules voisins arrondis se touchent en un point et
-                // laissent un pincement : à 5 pt par module, un motif de
-                // repérage finit en collier de perles, illisible au scan. On
-                // recoud le joint avec un rectangle centré sur la frontière.
+                // Two neighbouring rounded modules meet at a single point and
+                // leave a pinch: at 5 pt per module a finder pattern ends up a
+                // string of beads, unreadable to a scanner. We stitch the joint
+                // back with a rectangle centred on the boundary.
                 if col + 1 < line.count, line[col + 1] {
                     path.appendRect(NSRect(x: cell.midX, y: cell.minY, width: unit, height: unit))
                 }
@@ -397,7 +395,7 @@ private final class QRCodeView: NSView {
         path.fill()
     }
 
-    /// Matrice des modules, sans la zone de silence : `true` = module sombre.
+    /// Matrix of modules, quiet zone removed: `true` = dark module.
     private static func matrix(for url: URL) -> [[Bool]] {
         guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return [] }
         filter.setValue(Data(url.absoluteString.utf8), forKey: "inputMessage")
@@ -421,12 +419,12 @@ private final class QRCodeView: NSView {
         }
         guard ok else { return [] }
 
-        // Core Graphics rend l'origine en bas ; la matrice se lit du haut.
+        // Core Graphics puts the origin at the bottom; the matrix reads from the top.
         var grid = (0..<height).map { y in
             (0..<width).map { x in pixels[(height - 1 - y) * width + x] < 128 }
         }
-        // La zone de silence est redessinée par la marge du panneau : on la
-        // retire ici, sinon le QR flotte décentré dans son cadre.
+        // The quiet zone is redrawn by the panel's padding: we strip it here,
+        // otherwise the QR floats off-centre in its frame.
         while let first = grid.first, !first.contains(true) { grid.removeFirst() }
         while let last = grid.last, !last.contains(true) { grid.removeLast() }
         guard !grid.isEmpty else { return [] }
@@ -442,20 +440,20 @@ private final class QRCodeView: NSView {
     }
 }
 
-// MARK: - Barre
+// MARK: - Bar
 
 protocol BarDelegate: AnyObject {
     func barDidToggleMute()
     func barDidEnd()
 }
 
-/// Pill sombre translucide, calé en bas à gauche de l'écran principal, avec le
-/// QR de la réunion qui se déplie au-dessus. Panneau non activant : cliquer
-/// dessus ne vole jamais le focus à l'application de visio.
+/// Dark translucent pill, parked at the bottom-left of the main screen, with
+/// the meeting's QR unfolding above it. Non-activating panel: clicking it never
+/// steals focus from the video-call app.
 ///
-/// Sa largeur est CONSTANTE d'un bout à l'autre de la réunion : chaque élément
-/// réserve sa place maximale. Rien de ce qui arrive pendant une réunion
-/// (téléphone qui rejoint, micro coupé) ne doit faire bouger la barre.
+/// Its width is CONSTANT for the whole meeting: every element reserves its
+/// widest footprint. Nothing that happens during a meeting (a phone joining,
+/// the mic muted) may make the bar move.
 final class Bar {
     private weak var delegate: BarDelegate?
 
@@ -463,9 +461,9 @@ final class Bar {
     private let meter = LevelMeter()
     private let qrToggle = QRToggle()
     private let dots = PhoneDotsView()
-    private lazy var muteButton = PillButton(labels: ["Couper", "Réactiver"], prominent: false,
+    private lazy var muteButton = PillButton(labels: ["Mute", "Unmute"], prominent: false,
                                              target: self, action: #selector(toggleMute))
-    private lazy var endButton = PillButton(labels: ["Terminer"], prominent: true,
+    private lazy var endButton = PillButton(labels: ["End"], prominent: true,
                                             target: self, action: #selector(end))
 
     private lazy var pill: PillBackground = buildPill()
@@ -481,14 +479,14 @@ final class Bar {
     private var overQR = false
     private var hoverWork: DispatchWorkItem?
 
-    /// Valeur reçue et valeur affichée : le lissage se fait entre les deux.
+    /// Received value and displayed value: the smoothing happens between the two.
     private var targetLevel: CGFloat = 0
     private var shownLevel: CGFloat = 0
     private var meterTimer: Timer?
 
     private(set) var isVisible = false
-    /// Le QR reste déplié après un clic sur l'icône, pour laisser les gens
-    /// scanner sans que la souris ait à rester posée dessus.
+    /// The QR stays unfolded after a click on the icon, so people can scan
+    /// without the mouse having to sit on it.
     private(set) var isQRPinned = false
 
     init(delegate: BarDelegate) {
@@ -549,7 +547,7 @@ final class Bar {
             self?.hoverChanged()
         }
 
-        let caption = NSTextField(labelWithString: "Scannez pour rejoindre")
+        let caption = NSTextField(labelWithString: "Scan to join")
         caption.font = .systemFont(ofSize: 11, weight: .medium)
         caption.textColor = Style.ink.withAlphaComponent(0.6)
         caption.alignment = .center
@@ -576,9 +574,8 @@ final class Bar {
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
         configure(panel)
-        // Conteneur transparent : c'est le pill à l'intérieur qu'on met à
-        // l'échelle, pas la fenêtre — redimensionner la fenêtre relancerait la
-        // mise en page et ferait baver le QR.
+        // Transparent container: it is the pill inside that gets scaled, not
+        // the window — resizing the window would rerun layout and smear the QR.
         let container = NSView(frame: .zero)
         container.wantsLayer = true
         qrPill.translatesAutoresizingMaskIntoConstraints = false
@@ -603,7 +600,7 @@ final class Bar {
         panel.level = .screenSaver
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary,
                                     .fullScreenAuxiliary, .ignoresCycle]
-        // Toujours sombre, quel que soit le thème système.
+        // Always dark, whatever the system theme.
         panel.appearance = NSAppearance(named: .vibrantDark)
     }
 
@@ -627,7 +624,7 @@ final class Bar {
         reposition(animated: false)
         let destination = targetFrame()
         panel.alphaValue = 0
-        // Glissement depuis le bas, comme Eyesaver.
+        // Slide up from below, like Eyesaver.
         panel.setFrame(destination.offsetBy(dx: 0, dy: -12), display: false)
         panel.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { ctx in
@@ -652,14 +649,14 @@ final class Bar {
         }, completionHandler: { [self] in panel.orderOut(nil) })
     }
 
-    /// Niveau du mix, 0…1, reçu ~20 fois par seconde. Seule la cible bouge ici :
-    /// l'affichage la rejoint dans `tick`, sinon la jauge saute à chaque paquet.
+    /// Mix level, 0…1, received ~20 times a second. Only the target moves here:
+    /// the display catches up in `tick`, otherwise the gauge jumps on every packet.
     func setLevel(_ level: Float) {
         targetLevel = CGFloat(min(1, max(0, level)))
     }
 
-    /// Aucun recalcul de fenêtre : la zone des points est déjà à sa taille
-    /// maximale, les cercles se contentent de s'y allumer.
+    /// No window recompute: the dot area is already at its maximum size, the
+    /// circles merely light up inside it.
     func setPhones(_ dots: [PhoneDot]) {
         self.dots.set(Array(dots.prefix(Style.maxPhones)))
     }
@@ -667,7 +664,7 @@ final class Bar {
     func setMuted(_ muted: Bool) {
         guard muted != self.muted else { return }
         self.muted = muted
-        muteButton.update(label: muted ? "Réactiver" : "Couper")
+        muteButton.update(label: muted ? "Unmute" : "Mute")
         muteButton.tinted = muted
         applyMicSymbol()
         meter.dimmed = muted
@@ -679,12 +676,12 @@ final class Bar {
         positionQR()
     }
 
-    // MARK: Vu-mètre
+    // MARK: Level meter
 
     private func startMeter() {
         guard meterTimer == nil else { return }
         let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
-        // `.common` : sinon la jauge se fige dès qu'un menu est ouvert.
+        // `.common`: otherwise the gauge freezes as soon as a menu is open.
         RunLoop.main.add(timer, forMode: .common)
         meterTimer = timer
     }
@@ -697,8 +694,8 @@ final class Bar {
         meter.level = 0
     }
 
-    /// Montée rapide, descente lente : une attaque molle rate les syllabes, une
-    /// descente rapide fait scintiller la jauge entre deux mots.
+    /// Fast rise, slow fall: a soft attack misses syllables, and a fast fall
+    /// makes the gauge flicker between words.
     private func tick() {
         let coefficient: CGFloat = targetLevel > shownLevel ? 0.45 : 0.10
         shownLevel += (targetLevel - shownLevel) * coefficient
@@ -706,7 +703,7 @@ final class Bar {
         meter.level = shownLevel
     }
 
-    // MARK: Survol, épinglage et QR
+    // MARK: Hover, pinning and QR
 
     private func togglePin() {
         isQRPinned.toggle()
@@ -723,8 +720,8 @@ final class Bar {
         if overToggle || overQR {
             showQR()
         } else if !isQRPinned {
-            // Petit délai : le trajet de l'icône vers le QR passe par un vide de
-            // quelques points, et sans ça le panneau clignoterait.
+            // Small delay: the trip from the icon to the QR crosses a gap of a
+            // few points, and without this the panel would flicker.
             let work = DispatchWorkItem { [weak self] in
                 guard let self, !self.overToggle, !self.overQR, !self.isQRPinned else { return }
                 self.hideQR(animated: true)
@@ -775,8 +772,8 @@ final class Bar {
         })
     }
 
-    /// Mise à l'échelle autour du centre, sans toucher à l'`anchorPoint` : AppKit
-    /// le repositionne à chaque passe de layout, la composition manuelle survit.
+    /// Scaling around the centre without touching `anchorPoint`: AppKit resets
+    /// it on every layout pass, whereas the manual composition survives.
     private func centeredScale(_ scale: CGFloat) -> CATransform3D {
         guard let layer = qrPill.layer else { return CATransform3DIdentity }
         let anchor = layer.anchorPoint
@@ -805,8 +802,8 @@ final class Bar {
         layer.add(animation, forKey: "scale")
     }
 
-    /// Centré au-dessus du pill, comme le pill l'est sur l'écran ; borné aux
-    /// marges pour ne jamais déborder.
+    /// Centred above the pill, as the pill is on the screen; clamped to the
+    /// margins so it never overflows.
     private func positionQR() {
         let size = qrPill.fittingSize
         let pillFrame = panel.frame
@@ -838,14 +835,14 @@ final class Bar {
         }
     }
 
-    /// Centré en bas de l'écran, comme Eyesaver. Décision Nicolas (12/09) :
-    /// un coin ne marche pas avec un Dock à gauche ou en bas, le centre est
-    /// neutre. `visibleFrame` : au niveau `.screenSaver` la barre passerait
-    /// par-dessus le Dock si on partait du bord physique (mesuré : 44 pt de
-    /// chevauchement). Dock masqué → elle descend au ras du bord.
+    /// Centred at the bottom of the screen, like Eyesaver. Nicolas's call
+    /// (12/09): a corner does not work with a Dock on the left or at the bottom,
+    /// the centre is neutral. `visibleFrame`: at `.screenSaver` level the bar
+    /// would sit over the Dock if we started from the physical edge (measured:
+    /// 44 pt of overlap). Dock hidden → it drops flush with the edge.
     ///
-    /// La largeur vient de `fittingSize`, mais elle est constante : tous les
-    /// éléments ont une largeur figée.
+    /// The width comes from `fittingSize`, but it is constant: every element
+    /// has a frozen width.
     private func targetFrame() -> NSRect {
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let width = pill.fittingSize.width.rounded()

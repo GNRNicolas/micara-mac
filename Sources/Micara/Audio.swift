@@ -1,66 +1,66 @@
-// Audio.swift — le moteur temps réel : pistes WebRTC + micro du Mac → mix → BlackHole.
+// Audio.swift — the real-time engine: WebRTC tracks + the Mac's mic → mix → BlackHole.
 //
-// Portage de `bridge/renderer/src/engine.js` (graphe Web Audio) en AVAudioEngine.
-// Chaîne : piste distante → LKRTCAudioRenderer → conversion 48 kHz mono →
-// ring buffer → AVAudioSourceNode unique (gate/dominance + lissage + limiteur)
-// → canaux 1-2 de BlackHole 16ch. Le micro du Mac est un canal comme un autre
-// (id `__local__`), jamais coupé par `phonesMuted`, exactement comme LOCAL_ID
-// dans le JS.
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// COUPER LE PLAYOUT WEBRTC — RÉSULTAT DU SPIKE (12/09, mesuré sur cette machine)
-// ─────────────────────────────────────────────────────────────────────────────
-// Question : les pistes distantes doivent arriver dans NOTRE mixeur via le
-// renderer, et WebRTC ne doit PAS les jouer lui-même dans les haut-parleurs.
-// Les trois options de la spec ont été essayées dans l'ordre, en bouclage local
-// (deux LKRTCPeerConnection dans le même process) :
-//
-//  1. NE PAS démarrer le playout de l'ADM (`stopPlayout` + `setEngineAvailability`
-//     avec `isOutputAvailable = false`) → LE RENDERER NE REÇOIT PLUS RIEN.
-//     Mesuré : 400 buffers reçus en 4 s avec le playout, 0 sans. Cohérent avec
-//     libwebrtc, où le sink d'une piste DISTANTE est alimenté depuis
-//     `ChannelReceive::GetAudioFrameWithInfo`, appelé par la seule boucle de
-//     playout (AudioMixer tiré par l'ADM). Pas de playout = pas de décodage =
-//     pas de PCM. OPTION ÉCARTÉE.
-//
-//  2. `track.source.volume = 0` → OPTION RETENUE. Mesuré :
-//       • le renderer continue de recevoir 100 buffers/s, à pleine amplitude
-//         (crête 0,13 avec volume 0 contre 0,12 avec volume 1) ;
-//       • ce que l'ADM joue est un SILENCE NUMÉRIQUE : playout redirigé vers
-//         BlackHole 2ch et enregistré de l'extérieur → -42,2 dB crête à
-//         volume 1, -91 dB (plancher de mesure) à volume 0.
-//     Autrement dit le gain de sortie est appliqué APRÈS la livraison au sink :
-//     on garde le PCM intact et rien ne sort des haut-parleurs.
-//
-//  3. `trySetOutputDevice(BlackHole)` : pas nécessaire, et pas disponible non
-//     plus — l'ADM `.audioEngine` de ce fork n'expose QUE la sortie par défaut
-//     du système dans `outputDevices` (BlackHole n'y figure jamais). Ç'aurait de
-//     toute façon été mauvais : notre AVAudioEngine écrit déjà les téléphones
-//     dans BlackHole, WebRTC les y aurait écrits une seconde fois.
-//
-// La factory est créée avec l'ADM `.audioEngine` et `bypassVoiceProcessing = true`
-// (voir `SignalClient`) : le traitement de voix de WebRTC ne sert à rien ici —
-// le bridge n'ÉMET aucune piste, il ne fait que recevoir.
+// Port of `bridge/renderer/src/engine.js` (the Web Audio graph) to AVAudioEngine.
+// Chain: remote track → LKRTCAudioRenderer → conversion to 48 kHz mono → ring
+// buffer → a single AVAudioSourceNode (gate/dominance + smoothing + limiter) →
+// channels 1-2 of BlackHole 16ch. The Mac's mic is a channel like any other
+// (id `__local__`), never muted by `phonesMuted`, exactly like LOCAL_ID in the
+// JS.
 //
 // ─────────────────────────────────────────────────────────────────────────────
-// DEUX AVAudioEngine, ET L'ENTRÉE DÉMARRE EN PREMIER
+// SILENCING WEBRTC PLAYOUT — RESULT OF THE SPIKE (12/09, measured on this machine)
 // ─────────────────────────────────────────────────────────────────────────────
-// Un AVAudioEngine ne pilote qu'UNE unité d'E/S : fixer
-// `kAudioOutputUnitProperty_CurrentDevice` pour sortir sur BlackHole fixerait
-// aussi son entrée sur BlackHole — le « micro » du Mac deviendrait notre propre
-// mix (boucle). D'où deux moteurs : `outputEngine` (source → BlackHole) et
-// `inputEngine` (micro → tap).
+// The question: remote tracks must reach OUR mixer through the renderer, and
+// WebRTC must NOT play them into the speakers itself. The spec's three options
+// were tried in order, in a local loopback (two LKRTCPeerConnection in the same
+// process):
 //
-// ORDRE : l'ENTRÉE d'abord. Monter le moteur d'entrée reconfigure les unités
-// d'E/S et TUE un moteur de sortie déjà démarré — mesuré : la sortie rendait
-// 36 blocs (~0,4 s) puis se taisait définitivement, sans erreur ni notification.
-// Entrée puis sortie : 548 blocs en 5 s, vu-mètre à 0,6, BlackHole enregistré à
-// -34 dB crête.
+//  1. NOT starting the ADM's playout (`stopPlayout` + `setEngineAvailability`
+//     with `isOutputAvailable = false`) → THE RENDERER RECEIVES NOTHING AT ALL.
+//     Measured: 400 buffers in 4 s with playout, 0 without. Consistent with
+//     libwebrtc, where a REMOTE track's sink is fed from
+//     `ChannelReceive::GetAudioFrameWithInfo`, called only by the playout loop
+//     (the AudioMixer pulled by the ADM). No playout = no decoding = no PCM.
+//     OPTION DISCARDED.
 //
-// Le micro capté n'est JAMAIS « le device d'entrée par défaut » pris aveuglément :
-// pendant une réunion le défaut EST l'agrégat Micara (donc BlackHole). On choisit
-// explicitement un vrai micro (`resolveInputDevice`) — au prix de l'AEC quand ce
-// micro n'est pas le défaut du système, voir `startInput`.
+//  2. `track.source.volume = 0` → THE OPTION KEPT. Measured:
+//       • the renderer keeps receiving 100 buffers/s, at full amplitude
+//         (peak 0.13 at volume 0 against 0.12 at volume 1);
+//       • what the ADM plays is DIGITAL SILENCE: playout redirected to
+//         BlackHole 2ch and recorded from outside → -42.2 dB peak at volume 1,
+//         -91 dB (the measurement floor) at volume 0.
+//     In other words the output gain is applied AFTER delivery to the sink: we
+//     keep the PCM intact and nothing leaves the speakers.
+//
+//  3. `trySetOutputDevice(BlackHole)`: not needed, and not available either —
+//     this fork's `.audioEngine` ADM only exposes the system's default output
+//     in `outputDevices` (BlackHole never shows up there). It would have been
+//     wrong anyway: our AVAudioEngine already writes the phones into BlackHole,
+//     and WebRTC would have written them there a second time.
+//
+// The factory is created with the `.audioEngine` ADM and
+// `bypassVoiceProcessing = true` (see `SignalClient`): WebRTC's voice processing
+// is useless here — the bridge SENDS no track, it only receives.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// TWO AVAudioEngine, AND THE INPUT ONE STARTS FIRST
+// ─────────────────────────────────────────────────────────────────────────────
+// An AVAudioEngine drives only ONE I/O unit: setting
+// `kAudioOutputUnitProperty_CurrentDevice` to output to BlackHole would set its
+// input to BlackHole too — the Mac's "mic" would become our own mix (a loop).
+// Hence two engines: `outputEngine` (source → BlackHole) and `inputEngine`
+// (mic → tap).
+//
+// ORDER: the INPUT first. Bringing the input engine up reconfigures the I/O
+// units and KILLS an output engine that is already running — measured: the
+// output rendered 36 blocks (~0.4 s) then went silent for good, with no error
+// and no notification. Input then output: 548 blocks in 5 s, meter at 0.6,
+// BlackHole recorded at -34 dB peak.
+//
+// The captured mic is NEVER "the default input device" taken blindly: during a
+// meeting the default IS the Micara aggregate (so, BlackHole). We pick a real
+// mic explicitly (`resolveInputDevice`) — at the cost of AEC when that mic is
+// not the system default, see `startInput`.
 
 import AVFoundation
 import CoreAudio
@@ -68,52 +68,52 @@ import Foundation
 import LiveKitWebRTC
 import MicaraCore
 
-// MARK: - Constantes
+// MARK: - Constants
 
-/// Identifiant du micro du Mac dans le mixeur — même valeur que `LOCAL_ID` du JS
-/// (le mixeur le traite comme n'importe quel flux : il peut être dominant).
+/// Id of the Mac's mic inside the mixer — same value as `LOCAL_ID` in the JS
+/// (the mixer treats it like any other stream: it can become dominant).
 let localChannelID = "__local__"
 
-/// Tout le mixage se fait à 48 kHz mono : c'est le débit de sortie de WebRTC et
-/// celui de BlackHole. Un seul taux dans le graphe = une seule conversion, à
-/// l'entrée de chaque canal.
+/// All mixing happens at 48 kHz mono: that is WebRTC's output rate and
+/// BlackHole's. One rate in the graph = one conversion, at each channel's
+/// input.
 private let mixSampleRate: Double = 48_000
 
-/// Limiteur de sortie : mêmes constantes que le `DynamicsCompressor` du JS
-/// (`mixComp`), réglées en réunion réelle. Sans lui, le gain d'entrée +10 dB et
-/// une parole proche écrêtent à la conversion finale (« voix déformée », 19/08).
+/// Output limiter: same constants as the JS `DynamicsCompressor` (`mixComp`),
+/// tuned in real meetings. Without it, the +10 dB input gain plus close speech
+/// clip at the final conversion ("distorted voice", 19/08).
 private let limiterThresholdDb: Float = -6
 private let limiterKneeDb: Float = 6
 private let limiterRatio: Float = 20
 private let limiterAttackSec: Float = 0.002
 private let limiterReleaseSec: Float = 0.15
 
-/// Plafond de retard toléré dans un ring buffer avant de jeter les échantillons
-/// les plus vieux. POURQUOI : l'horloge de WebRTC et celle de BlackHole ne sont
-/// pas la même ; sans purge, la dérive s'accumule en latence permanente.
+/// Ceiling on the lag tolerated in a ring buffer before the oldest samples are
+/// dropped. WHY: WebRTC's clock and BlackHole's are not the same one; without
+/// pruning, the drift piles up into permanent latency.
 private let maxRingLatencySec: Double = 0.20
 
-/// Fenêtre du vu-mètre et du tick de mixage (`MIX.tickMs` du JS).
+/// Window of the level meter and of the mixing tick (`MIX.tickMs` in the JS).
 private let tickSec: Double = 0.05
 
-// MARK: - Ring buffer par canal
+// MARK: - Per-channel ring buffer
 
-/// File circulaire mono Float32, un producteur (le thread WebRTC ou le tap du
-/// micro) et un consommateur (le thread CoreAudio).
+/// Circular mono Float32 queue, one producer (the WebRTC thread or the mic tap)
+/// and one consumer (the CoreAudio thread).
 ///
-/// POURQUOI un `os_unfair_lock` et pas du lock-free : la section critique est un
-/// `memcpy` de quelques centaines de flottants, jamais une allocation ni un
-/// appel système. C'est l'option honnête — un lock-free écrit à la main sans
-/// primitives atomiques Swift 5.9 aurait été faux plus souvent que lent.
+/// WHY an `os_unfair_lock` rather than lock-free: the critical section is a
+/// `memcpy` of a few hundred floats, never an allocation nor a system call. It
+/// is the honest option — a hand-written lock-free queue without Swift 5.9
+/// atomics would have been wrong more often than it was slow.
 private final class Ring {
     private let capacity: Int
     private let storage: UnsafeMutablePointer<Float>
     private var writeIndex = 0
     private var filled = 0
     private var lock = os_unfair_lock_s()
-    /// Crête écrite depuis la dernière lecture — diagnostic seulement (le
-    /// journal doit pouvoir dire « des paquets arrivent mais ils sont muets »,
-    /// panne qu'un compteur de buffers ne distingue pas d'un flux normal).
+    /// Peak written since the last read — diagnostics only (the log must be
+    /// able to say "packets are arriving but they are silent", a failure a
+    /// buffer counter cannot tell apart from a healthy stream).
     private var peakSinceRead: Float = 0
 
     init(capacity: Int) {
@@ -129,8 +129,8 @@ private final class Ring {
 
     func write(_ source: UnsafePointer<Float>, count: Int) {
         guard count > 0 else { return }
-        // Un buffer plus gros que le ring ne peut pas arriver (10 ms WebRTC vs
-        // 500 ms de ring), mais on ne lit que la queue plutôt que déborder.
+        // A buffer larger than the ring cannot happen (10 ms of WebRTC against
+        // 500 ms of ring), but we read only its tail rather than overflow.
         let n = min(count, capacity)
         let src = source + (count - n)
         os_unfair_lock_lock(&lock)
@@ -145,12 +145,12 @@ private final class Ring {
         filled = min(filled + n, capacity)
     }
 
-    /// Lit `count` échantillons ; complète par des zéros si le producteur est en
-    /// retard (sous-alimentation = silence, jamais du bruit ou du vieux son).
+    /// Reads `count` samples; pads with zeros if the producer is behind
+    /// (underrun = silence, never noise or stale sound).
     func read(into destination: UnsafeMutablePointer<Float>, count: Int, dropOlderThan maxFrames: Int) {
         os_unfair_lock_lock(&lock)
-        // Purge de la dérive : on jette le plus VIEUX, jamais le plus récent —
-        // le retard doit se rattraper en avant, pas en répétant du passé.
+        // Drift pruning: we throw away the OLDEST, never the newest — the lag
+        // must be caught up forwards, not by replaying the past.
         if filled > maxFrames { filled = maxFrames }
         let available = min(filled, count)
         let missing = count - available
@@ -173,7 +173,7 @@ private final class Ring {
         os_unfair_lock_unlock(&lock)
     }
 
-    /// Crête écrite depuis le dernier appel, puis remise à zéro.
+    /// Peak written since the last call, then reset to zero.
     func drainPeak() -> Float {
         os_unfair_lock_lock(&lock)
         defer { peakSinceRead = 0; os_unfair_lock_unlock(&lock) }
@@ -181,20 +181,20 @@ private final class Ring {
     }
 }
 
-// MARK: - Canal
+// MARK: - Channel
 
-/// Un flux dans le mix : le ring alimenté par WebRTC (ou le micro), l'état de
-/// lissage (thread audio seul) et la boîte aux lettres partagée avec le tick.
+/// One stream in the mix: the ring fed by WebRTC (or by the mic), the
+/// smoothing state (audio thread only) and the mailbox shared with the tick.
 private final class Channel {
     let id: String
     let isLocal: Bool
     let ring = Ring(capacity: Int(mixSampleRate / 2))  // 500 ms
 
-    /// État du thread audio EXCLUSIVEMENT : personne d'autre n'y touche.
+    /// Audio-thread state EXCLUSIVELY: nobody else touches it.
     var smoother = GainSmoother()
 
-    // Boîte aux lettres thread audio ↔ tick, sous un verrou tenu quelques
-    // nanosecondes (deux Double et un Float).
+    // Mailbox between the audio thread and the tick, under a lock held for a
+    // few nanoseconds (two Doubles and a Float).
     private var lock = os_unfair_lock_s()
     private var sumSquares: Double = 0
     private var sampleCount: Int = 0
@@ -205,8 +205,8 @@ private final class Channel {
         self.isLocal = isLocal
     }
 
-    /// Thread audio → tick : niveau mesuré APRÈS le gain d'entrée (comme le JS,
-    /// où l'analyseur est branché après `inputGain`).
+    /// Audio thread → tick: level measured AFTER the input gain (like the JS,
+    /// where the analyser sits after `inputGain`).
     func accumulate(sumSquares s: Double, count: Int) {
         os_unfair_lock_lock(&lock)
         sumSquares += s
@@ -214,8 +214,8 @@ private final class Channel {
         os_unfair_lock_unlock(&lock)
     }
 
-    /// Tick → lit et remet à zéro la fenêtre. `nil` si aucun échantillon n'est
-    /// passé (canal tout juste créé) : pas de mesure = pas d'entrée de niveau.
+    /// Tick → reads and clears the window. `nil` if no sample went through (a
+    /// brand-new channel): no measurement = no level entry.
     func drainLevelDb() -> Float? {
         os_unfair_lock_lock(&lock)
         let s = sumSquares, n = sampleCount
@@ -242,13 +242,13 @@ private final class Channel {
     }
 }
 
-// MARK: - Renderer d'une piste distante
+// MARK: - Renderer for a remote track
 
-/// Reçoit le PCM d'une `LKRTCAudioTrack` (thread de WebRTC, pas le thread
-/// CoreAudio), le convertit en 48 kHz mono Float32 et le pousse dans le ring.
+/// Receives the PCM of an `LKRTCAudioTrack` (WebRTC's thread, not the CoreAudio
+/// one), converts it to 48 kHz mono Float32 and pushes it into the ring.
 ///
-/// La conversion est faite ICI, hors du thread temps réel : c'est le seul
-/// endroit où l'on peut allouer sans risquer un glitch de sortie.
+/// The conversion happens HERE, off the real-time thread: it is the only place
+/// where allocating cannot cause an output glitch.
 private final class TrackRenderer: NSObject, LKRTCAudioRenderer {
     private weak var channel: Channel?
     private let targetFormat = AVAudioFormat(
@@ -261,7 +261,7 @@ private final class TrackRenderer: NSObject, LKRTCAudioRenderer {
     private var converterInputFormat: AVAudioFormat?
     private var scratch: AVAudioPCMBuffer?
 
-    /// Compteur de diagnostic (spike + journal) : prouve que le PCM arrive.
+    /// Diagnostic counter (spike + log): proves the PCM is arriving.
     private(set) var bufferCount: Int = 0
 
     init(channel: Channel) {
@@ -275,9 +275,9 @@ private final class TrackRenderer: NSObject, LKRTCAudioRenderer {
         channel.ring.write(data[0], count: Int(mono.frameLength))
     }
 
-    /// Ramène n'importe quel format livré par WebRTC (Int16/Float32, 1 ou 2
-    /// canaux, 48 kHz en pratique) au format du mix. Le convertisseur est
-    /// reconstruit si le format change en cours de route.
+    /// Brings whatever format WebRTC delivers (Int16/Float32, 1 or 2 channels,
+    /// 48 kHz in practice) to the mix format. The converter is rebuilt if the
+    /// format changes along the way.
     private func convert(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
         let inFormat = buffer.format
         if inFormat == targetFormat { return buffer }
@@ -310,32 +310,33 @@ private final class TrackRenderer: NSObject, LKRTCAudioRenderer {
     }
 }
 
-// MARK: - État du thread audio
+// MARK: - Audio-thread state
 
-/// Tout ce que le bloc de rendu touche. Objet séparé (et non `AudioEngine`) pour
-/// que le bloc puisse le capturer fortement sans créer de cycle avec le moteur.
+/// Everything the render block touches. A separate object (rather than
+/// `AudioEngine`) so the block can capture it strongly without creating a cycle
+/// with the engine.
 private final class Mixdown {
     var config: MixerConfig
     private var stateLock = os_unfair_lock_s()
     private var pendingChannels: [Channel]?
-    /// Copie détenue par le seul thread audio : évite de prendre le verrou quand
-    /// rien n'a changé (le cas de 99,99 % des blocs).
+    /// Copy owned by the audio thread alone: avoids taking the lock when
+    /// nothing has changed (the case for 99.99 % of blocks).
     private var renderChannels: [Channel] = []
 
     private var _mode: MixMode = .dominance
     private var _muted = false
     private var outSumSquares: Double = 0
     private var outSampleCount: Int = 0
-    /// Nombre de blocs rendus — diagnostic : zéro = le graphe de sortie ne tourne
-    /// pas du tout (device pris par un autre process, format refusé…).
+    /// Number of rendered blocks — diagnostics: zero = the output graph is not
+    /// running at all (device taken by another process, format refused…).
     private(set) var renderCount: Int = 0
 
-    // Tampons préalloués : aucune allocation dans le bloc de rendu.
+    // Pre-allocated buffers: no allocation in the render block.
     private let maxFrames = 8192
     private let scratch: UnsafeMutablePointer<Float>
     private let mix: UnsafeMutablePointer<Float>
 
-    // État du limiteur (thread audio seul).
+    // Limiter state (audio thread only).
     private var envelope: Float = 0
     private let attackCoef: Float
     private let releaseCoef: Float
@@ -372,13 +373,13 @@ private final class Mixdown {
         withLock { pendingChannels = channels }
     }
 
-    /// Snapshot pour le tick (hors thread audio).
+    /// Snapshot for the tick (off the audio thread).
     func channelsSnapshot() -> [Channel] {
         withLock { pendingChannels ?? renderChannels }
     }
 
-    /// Niveau du mix sur la fenêtre écoulée, en dBFS. `nil` si le moteur n'a pas
-    /// rendu un seul bloc depuis le dernier appel (moteur arrêté).
+    /// Level of the mix over the elapsed window, in dBFS. `nil` if the engine
+    /// has not rendered a single block since the last call (engine stopped).
     func drainOutputDb() -> Float? {
         var s: Double = 0
         var n = 0
@@ -400,15 +401,15 @@ private final class Mixdown {
         return body()
     }
 
-    // MARK: bloc de rendu (thread CoreAudio — aucune allocation, aucun verrou long)
+    // MARK: render block (CoreAudio thread — no allocation, no long lock)
 
     func render(frameCount: Int, output: UnsafeMutableAudioBufferListPointer) -> OSStatus {
         let frames = min(frameCount, maxFrames)
         renderCount += 1
 
-        // Récupération de la nouvelle liste de canaux SANS bloquer : si le tick
-        // ou la main queue tient le verrou, on garde la liste précédente un
-        // bloc de plus (5-10 ms) plutôt que d'attendre sur le thread audio.
+        // Pick up the new channel list WITHOUT blocking: if the tick or the
+        // main queue holds the lock, we keep the previous list for one more
+        // block (5-10 ms) rather than wait on the audio thread.
         if os_unfair_lock_trylock(&stateLock) {
             if let pending = pendingChannels {
                 renderChannels = pending
@@ -416,8 +417,8 @@ private final class Mixdown {
             }
             os_unfair_lock_unlock(&stateLock)
         }
-        let muted = _muted  // lecture non verrouillée d'un Bool : au pire on
-        // applique la valeur d'avant pendant un bloc.
+        let muted = _muted  // unlocked read of a Bool: at worst we apply the
+        // previous value for one block.
 
         mix.update(repeating: 0, count: frames)
         let inputGain = gainFromDb(config.inputGainDb)
@@ -427,9 +428,9 @@ private final class Mixdown {
         for channel in renderChannels {
             channel.ring.read(into: scratch, count: frames, dropOlderThan: maxLatencyFrames)
 
-            // Gain d'entrée AVANT la mesure : c'est l'ordre du JS (source →
-            // inputGain → analyser), et c'est ce qui fait que le gate -45 dB
-            // s'ouvre pour un téléphone posé à deux mètres.
+            // Input gain BEFORE the measurement: that is the JS order (source →
+            // inputGain → analyser), and it is what makes the -45 dB gate open
+            // for a phone lying two metres away.
             var sumSq: Double = 0
             for i in 0..<frames {
                 let s = scratch[i] * inputGain
@@ -438,13 +439,14 @@ private final class Mixdown {
             }
             channel.accumulate(sumSquares: sumSq, count: frames)
 
-            // Le micro du Mac ne se coupe JAMAIS avec « Couper » : l'admin doit
-            // rester entendu dans Teams (règle 6 de la spec).
+            // The Mac's mic is NEVER silenced by "Mute": the admin must stay
+            // audible in Teams (rule 6 of the spec).
             let target = (muted && !channel.isLocal) ? 0 : channel.targetGain
             let from = channel.smoother.value
             let to = channel.smoother.step(target: target, dtSec: dt)
-            // Rampe linéaire sur le bloc : appliquer le gain lissé en escalier
-            // (une valeur par bloc) s'entend comme un clic à chaque bascule.
+            // Linear ramp across the block: applying the smoothed gain as a
+            // staircase (one value per block) is audible as a click on every
+            // switch.
             let slope = frames > 1 ? (to - from) / Float(frames) : 0
             for i in 0..<frames {
                 mix[i] += scratch[i] * (from + slope * Float(i))
@@ -461,9 +463,9 @@ private final class Mixdown {
             os_unfair_lock_unlock(&stateLock)
         }
 
-        // BlackHole 16ch : le mix part en stéréo dupliquée sur les canaux 1-2,
-        // le reste à zéro. Teams/Zoom ne prennent que les deux premiers canaux
-        // de l'agrégat ; y écrire ailleurs serait invisible pour eux.
+        // BlackHole 16ch: the mix leaves as duplicated stereo on channels 1-2,
+        // the rest at zero. Teams/Zoom only take the aggregate's first two
+        // channels; writing anywhere else would be invisible to them.
         for (index, buffer) in output.enumerated() {
             guard let raw = buffer.mData else { continue }
             let ptr = raw.assumingMemoryBound(to: Float.self)
@@ -479,10 +481,11 @@ private final class Mixdown {
         return noErr
     }
 
-    /// Limiteur soft-knee sur le mix, équivalent du `DynamicsCompressor` du JS
-    /// (seuil -6 dBFS, genou 6 dB, ratio 20, attaque 2 ms, release 150 ms).
-    /// Le clip final à ±1 est une ceinture : le limiteur laisse passer un
-    /// transitoire plus court que son attaque, la conversion en aval, non.
+    /// Soft-knee limiter on the mix, the equivalent of the JS
+    /// `DynamicsCompressor` (threshold -6 dBFS, knee 6 dB, ratio 20, attack
+    /// 2 ms, release 150 ms). The final clip at ±1 is a belt: the limiter lets
+    /// through a transient shorter than its attack, the conversion downstream
+    /// does not.
     private func limit(frames: Int) {
         for i in 0..<frames {
             let magnitude = abs(mix[i])
@@ -502,7 +505,7 @@ private final class Mixdown {
     }
 }
 
-// MARK: - Moteur
+// MARK: - Engine
 
 enum AudioEngineError: Error, CustomStringConvertible {
     case deviceNotFound(String)
@@ -511,41 +514,41 @@ enum AudioEngineError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
-        case let .deviceNotFound(uid): return "Périphérique de sortie introuvable : « \(uid) »"
-        case .noInputDevice: return "Aucun micro utilisable (hors BlackHole / agrégat Micara)"
-        case let .coreAudio(status, what): return "\(what) a échoué (OSStatus \(status))"
+        case let .deviceNotFound(uid): return "Output device not found: \"\(uid)\""
+        case .noInputDevice: return "No usable mic (BlackHole / Micara aggregate excluded)"
+        case let .coreAudio(status, what): return "\(what) failed (OSStatus \(status))"
         }
     }
 }
 
 final class AudioEngine {
 
-    // MARK: état public
+    // MARK: public state
 
     var mode: MixMode {
         get { mixdown.mode }
         set { mixdown.mode = newValue }
     }
 
-    /// Gain 0 sur TOUS les téléphones ; le micro du Mac continue (spec, règle 6).
+    /// Gain 0 on EVERY phone; the Mac's mic keeps going (spec, rule 6).
     var phonesMuted: Bool {
         get { mixdown.phonesMuted }
         set { mixdown.phonesMuted = newValue }
     }
 
-    /// Niveau du mix final, 0…1, sur la main queue, ~20 Hz.
+    /// Level of the final mix, 0…1, on the main queue, ~20 Hz.
     var onLevel: ((Float) -> Void)?
 
     private(set) var isRunning = false
 
-    // MARK: état interne
+    // MARK: internal state
 
     private let config: MixerConfig
     private let mixer: DominanceMixer
     private let mixdown: Mixdown
 
-    /// File série qui possède la table des canaux et le tick. Le thread audio ne
-    /// la touche jamais : il lit un snapshot publié par `Mixdown`.
+    /// Serial queue that owns the channel table and the tick. The audio thread
+    /// never touches it: it reads a snapshot published by `Mixdown`.
     private let queue = DispatchQueue(label: "com.getmicara.audio.control")
     private var channels: [String: Channel] = [:]
     private var renderers: [String: TrackRenderer] = [:]
@@ -557,17 +560,17 @@ final class AudioEngine {
     private var tickTimer: DispatchSourceTimer?
     private var inputConverter: AVAudioConverter?
     private var inputConverterFormat: AVAudioFormat?
-    /// Tampon mono réutilisé par le tap du micro (pas d'allocation par buffer).
+    /// Mono buffer reused by the mic tap (no allocation per buffer).
     private var localMono: [Float] = []
 
-    /// Dominant courant (diagnostic / journal), publié par le tick.
+    /// Current dominant (diagnostics / log), published by the tick.
     private(set) var dominantID: String?
-    /// Micro effectivement capté — `nil` si aucun (permission TCC refusée,
-    /// ou seul BlackHole disponible). L'UI doit pouvoir le dire à l'utilisateur.
+    /// The mic actually captured — `nil` if none (TCC permission refused, or
+    /// only BlackHole available). The UI must be able to tell the user.
     private(set) var inputDeviceName: String?
-    /// L'AEC est-elle réellement active sur le micro ? Faux quand le micro voulu
-    /// n'est pas l'entrée par défaut du système (limitation du VPIO, cf.
-    /// `startInput`) — l'UI et le journal doivent pouvoir le dire.
+    /// Is AEC really active on the mic? False when the wanted mic is not the
+    /// system's default input (a VPIO limitation, cf. `startInput`) — the UI and
+    /// the log must be able to say so.
     private(set) var inputEchoCancelled = false
 
     init(config: MixerConfig = .default) {
@@ -578,19 +581,19 @@ final class AudioEngine {
 
     deinit { stop() }
 
-    // MARK: - Démarrage / arrêt
+    // MARK: - Start / stop
 
-    /// Démarre le graphe : entrée = un vrai micro (AEC activée), sortie = le
-    /// device dont l'UID est donné. `inputDeviceUID` sert aux tests ; en
-    /// production on laisse `nil` et le moteur choisit (voir `resolveInputDevice`).
+    /// Starts the graph: input = a real mic (AEC on), output = the device with
+    /// the given UID. `inputDeviceUID` is for tests; in production it is left
+    /// `nil` and the engine picks (see `resolveInputDevice`).
     func start(outputDeviceUID: String, inputDeviceUID: String? = nil) throws {
         try queue.sync {
             guard !isRunning else { return }
-            // ENTRÉE D'ABORD : monter le moteur d'entrée reconfigure l'unité
-            // d'E/S et fait tomber un moteur de sortie déjà démarré (mesuré au
-            // spike : la sortie ne rendait plus que ~36 blocs puis se taisait).
-            // Un micro absent ou refusé (TCC) ne doit PAS empêcher la réunion :
-            // les téléphones sont l'essentiel, le micro du Mac est un bonus.
+            // INPUT FIRST: bringing the input engine up reconfigures the I/O
+            // unit and brings down an output engine that already started
+            // (measured at the spike: the output rendered ~36 blocks then went
+            // quiet). A missing or refused mic (TCC) must NOT block the meeting:
+            // the phones are the point, the Mac's mic is a bonus.
             do { try startInput(uid: inputDeviceUID) } catch {
                 inputEngine = nil
                 inputDeviceName = nil
@@ -632,20 +635,20 @@ final class AudioEngine {
         }
     }
 
-    // MARK: - Téléphones
+    // MARK: - Phones
 
-    /// Attache un renderer à la piste distante et crée son canal. Appelé dès que
-    /// la piste existe, SANS attendre `ICE connected` : côté Chromium, `ontrack`
-    /// précède l'établissement ICE (piège documenté dans `engine.js`) et
-    /// attendre ferait rater le début de la parole.
+    /// Attaches a renderer to the remote track and creates its channel. Called
+    /// as soon as the track exists, WITHOUT waiting for `ICE connected`: on
+    /// Chromium, `ontrack` precedes ICE establishment (a trap documented in
+    /// `engine.js`) and waiting would miss the start of speech.
     func addPhone(id: String, track: LKRTCAudioTrack) {
         queue.async { [self] in
             guard channels[id] == nil else { return }
             let channel = Channel(id: id, isLocal: false)
             channel.smoother = GainSmoother(attackSec: config.attackSec, releaseSec: config.releaseSec)
             let renderer = TrackRenderer(channel: channel)
-            // Option 2 du spike : le PCM continue d'arriver au renderer, mais
-            // WebRTC ne joue plus rien dans les haut-parleurs.
+            // Option 2 from the spike: the PCM keeps reaching the renderer,
+            // but WebRTC no longer plays anything into the speakers.
             track.source.volume = 0
             track.add(renderer)
             channels[id] = channel
@@ -668,10 +671,10 @@ final class AudioEngine {
         }
     }
 
-    /// Diagnostic (journal, télémétrie) : par canal, le nombre de buffers PCM
-    /// reçus depuis l'attache et la crête écrite depuis le dernier appel.
-    /// Les deux ensemble distinguent « rien n'arrive » de « ça arrive muet ».
-    /// Blocs rendus par le nœud de sortie depuis le démarrage.
+    /// Diagnostics (log, telemetry): per channel, the number of PCM buffers
+    /// received since attaching and the peak written since the last call. The
+    /// two together tell "nothing is arriving" from "it arrives silent".
+    /// Blocks rendered by the output node since start-up.
     var renderedBlocks: Int { mixdown.renderCount }
 
     func diagnostics() -> [String: (buffers: Int, peak: Float)] {
@@ -684,29 +687,29 @@ final class AudioEngine {
         }
     }
 
-    // MARK: - Graphe de sortie
+    // MARK: - Output graph
 
     private func startOutput(uid: String) throws {
         guard let device = AudioDevices.find(uid: uid) else {
             throw AudioEngineError.deviceNotFound(uid)
         }
         let engine = AVAudioEngine()
-        // Fixer le device AVANT de lire le format : c'est le format du device
-        // choisi qui doit dicter le nombre de canaux (16 pour BlackHole), pas
-        // celui de la sortie par défaut.
-        try setDevice(device.id, on: engine.outputNode, what: "sortie")
+        // Set the device BEFORE reading the format: the chosen device's format
+        // is what must dictate the channel count (16 for BlackHole), not the
+        // default output's.
+        try setDevice(device.id, on: engine.outputNode, what: "output")
 
         let hardware = engine.outputNode.outputFormat(forBus: 0)
         let channelCount = max(hardware.channelCount, 2)
         let sampleRate = hardware.sampleRate > 0 ? hardware.sampleRate : mixSampleRate
-        // Au-delà de 2 canaux, AVAudioFormat EXIGE une disposition explicite :
-        // l'initialiseur « commonFormat » renvoie nil, et BlackHole en a 16.
-        // `DiscreteInOrder` = pas de rôle (gauche/droite/LFE…), les canaux sont
-        // numérotés — c'est exactement ce que l'agrégat expose à Teams.
+        // Past 2 channels, AVAudioFormat DEMANDS an explicit layout: the
+        // "commonFormat" initialiser returns nil, and BlackHole has 16.
+        // `DiscreteInOrder` = no role (left/right/LFE…), the channels are
+        // numbered — exactly what the aggregate exposes to Teams.
         guard let layout = AVAudioChannelLayout(
             layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channelCount)
         ) else {
-            throw AudioEngineError.coreAudio(-1, "format de sortie \(channelCount) canaux")
+            throw AudioEngineError.coreAudio(-1, "output format with \(channelCount) channels")
         }
         let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channelLayout: layout)
 
@@ -724,7 +727,7 @@ final class AudioEngine {
         sourceNode = node
     }
 
-    // MARK: - Micro du Mac
+    // MARK: - The Mac's mic
 
     private func startInput(uid: String?) throws {
         guard let device = try resolveInputDevice(uid: uid) else {
@@ -733,14 +736,15 @@ final class AudioEngine {
         let channel = Channel(id: localChannelID, isLocal: true)
         channel.smoother = GainSmoother(attackSec: config.attackSec, releaseSec: config.releaseSec)
 
-        // AEC (équivalent d'`echoCancellation: true` côté Chromium) : possible
-        // SEULEMENT si le micro voulu est déjà l'entrée par défaut du système.
-        // Mesuré au spike : `setVoiceProcessingEnabled(true)` remonte le VPIO sur
-        // l'ENTRÉE PAR DÉFAUT et écrase le device qu'on venait de forcer (relu
-        // après coup : 132 au lieu de 138). Et forcer le device APRÈS l'avoir
-        // activé échoue (-10875) à tous les coups. Donc : AEC quand le défaut est
-        // le bon micro, capture sans AEC sinon. Ne jamais inverser la priorité —
-        // capter BlackHole par erreur boucle le mix sur lui-même.
+        // AEC (the equivalent of Chromium's `echoCancellation: true`): possible
+        // ONLY if the wanted mic is already the system's default input.
+        // Measured at the spike: `setVoiceProcessingEnabled(true)` brings the
+        // VPIO up on the DEFAULT INPUT and overwrites the device we had just
+        // forced (read back afterwards: 132 instead of 138). And forcing the
+        // device AFTER enabling it fails (-10875) every single time. So: AEC
+        // when the default is the right mic, capture without AEC otherwise.
+        // Never invert that priority — capturing BlackHole by mistake loops the
+        // mix onto itself.
         let canUseAEC = AudioDevices.defaultInputUID() == device.uid
         var engine: AVAudioEngine
         do {
@@ -756,32 +760,32 @@ final class AudioEngine {
         inputDeviceName = device.name
     }
 
-    /// Monte un moteur d'entrée seule sur un device précis.
+    /// Brings up an input-only engine on a specific device.
     ///
-    /// ORDRE CRITIQUE, trouvé au spike (toute autre séquence donne un tap qui ne
-    /// se déclenche JAMAIS, sans la moindre erreur, ou une unité qui refuse de
-    /// s'initialiser) :
-    ///   1. `AudioUnitUninitialize` — on ne peut pas changer le device d'une
-    ///      unité déjà initialisée : la propriété est ACCEPTÉE (status 0) et le
-    ///      tap reste muet pour toujours ;
-    ///   2. `kAudioOutputUnitProperty_CurrentDevice` ;
-    ///   3. `AudioUnitInitialize` ;
-    ///   4. `setVoiceProcessingEnabled` EN DERNIER (l'appeler avant fait échouer
-    ///      l'initialisation sur le device forcé) ;
-    ///   5. format du tap = `inputFormat(forBus:)`, le format MATÉRIEL. Avec
-    ///      `outputFormat` ou `nil`, aucun callback n'arrive.
+    /// CRITICAL ORDER, found at the spike (any other sequence gives a tap that
+    /// NEVER fires, without the slightest error, or a unit that refuses to
+    /// initialise):
+    ///   1. `AudioUnitUninitialize` — you cannot change the device of an
+    ///      already-initialised unit: the property is ACCEPTED (status 0) and
+    ///      the tap stays silent forever;
+    ///   2. `kAudioOutputUnitProperty_CurrentDevice`;
+    ///   3. `AudioUnitInitialize`;
+    ///   4. `setVoiceProcessingEnabled` LAST (calling it earlier makes
+    ///      initialisation on the forced device fail);
+    ///   5. tap format = `inputFormat(forBus:)`, the HARDWARE format. With
+    ///      `outputFormat` or `nil`, no callback ever arrives.
     ///
-    /// Avec le VPIO, le bus d'entrée expose 5 canaux PORTANT LE MÊME SIGNAL
-    /// (mesuré : RMS identique au dixième de dB sur les 5) : prendre le canal 0
-    /// est correct, et laisser `AVAudioConverter` « mélanger » ces 5 canaux ne
-    /// l'est pas (voir `pushLocal`).
+    /// With the VPIO, the input bus exposes 5 channels CARRYING THE SAME SIGNAL
+    /// (measured: identical RMS to a tenth of a dB across all 5): taking
+    /// channel 0 is right, and letting `AVAudioConverter` "mix down" those 5
+    /// channels is not (see `pushLocal`).
     private func makeInputEngine(
         device: AudioDeviceInfo, voiceProcessing: Bool, channel: Channel
     ) throws -> AVAudioEngine {
         let engine = AVAudioEngine()
         let input = engine.inputNode
         guard let unit = input.audioUnit else {
-            throw AudioEngineError.coreAudio(-1, "unité audio entrée")
+            throw AudioEngineError.coreAudio(-1, "input audio unit")
         }
         _ = AudioUnitUninitialize(unit)
         var deviceID = device.id
@@ -790,18 +794,18 @@ final class AudioEngine {
             &deviceID, UInt32(MemoryLayout<AudioObjectID>.size)
         )
         guard set == noErr else {
-            throw AudioEngineError.coreAudio(set, "device d'entrée \(device.name)")
+            throw AudioEngineError.coreAudio(set, "input device \(device.name)")
         }
         let initialized = AudioUnitInitialize(unit)
         guard initialized == noErr else {
-            throw AudioEngineError.coreAudio(initialized, "AudioUnitInitialize (entrée)")
+            throw AudioEngineError.coreAudio(initialized, "AudioUnitInitialize (input)")
         }
         if voiceProcessing {
             try input.setVoiceProcessingEnabled(true)
         }
         let format = input.inputFormat(forBus: 0)
         guard format.channelCount > 0, format.sampleRate > 0 else {
-            throw AudioEngineError.coreAudio(-1, "format d'entrée vide")
+            throw AudioEngineError.coreAudio(-1, "empty input format")
         }
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             self?.pushLocal(buffer, into: channel)
@@ -811,15 +815,15 @@ final class AudioEngine {
         return engine
     }
 
-    /// Convertit le buffer du micro en 48 kHz mono et le pousse dans le ring.
-    /// Le tap ne tourne pas sur le thread CoreAudio de la sortie : allouer le
-    /// convertisseur ici est sans conséquence pour le rendu.
-    /// POURQUOI ne PAS laisser `AVAudioConverter` faire la réduction de canaux :
-    /// avec le VPIO actif, le micro du Mac arrive en 5 canaux sans disposition
-    /// standard ; `AVAudioConverter` refuse alors silencieusement la conversion
-    /// (aucune erreur remontée, zéro trame produite — le micro restait muet au
-    /// spike). On extrait donc le canal 0 nous-mêmes, et le convertisseur ne
-    /// fait plus que du rééchantillonnage mono → mono.
+    /// Converts the mic's buffer to 48 kHz mono and pushes it into the ring.
+    /// The tap does not run on the output's CoreAudio thread: allocating the
+    /// converter here has no consequence for rendering.
+    /// WHY NOT let `AVAudioConverter` do the channel reduction: with the VPIO
+    /// active, the Mac's mic arrives as 5 channels with no standard layout;
+    /// `AVAudioConverter` then refuses the conversion silently (no error
+    /// reported, zero frames produced — the mic stayed mute at the spike). So we
+    /// extract channel 0 ourselves, and the converter only resamples mono →
+    /// mono.
     private func pushLocal(_ buffer: AVAudioPCMBuffer, into channel: Channel) {
         guard let data = buffer.floatChannelData, buffer.frameLength > 0 else { return }
         let frames = Int(buffer.frameLength)
@@ -867,10 +871,10 @@ final class AudioEngine {
         channel.ring.write(converted[0], count: Int(out.frameLength))
     }
 
-    /// Choisit le micro. JAMAIS « le device d'entrée par défaut » sans le
-    /// vérifier : pendant une réunion, le défaut est l'agrégat Micara, dont
-    /// l'entrée est BlackHole — c'est-à-dire NOTRE PROPRE MIX. Se capter
-    /// soi-même produirait une boucle qui monte jusqu'au limiteur en secondes.
+    /// Picks the mic. NEVER "the default input device" without checking it:
+    /// during a meeting the default is the Micara aggregate, whose input is
+    /// BlackHole — that is, OUR OWN MIX. Capturing ourselves would build a loop
+    /// that climbs to the limiter within seconds.
     private func resolveInputDevice(uid: String?) throws -> AudioDeviceInfo? {
         let devices = AudioDevices.all().filter { $0.inputChannels > 0 }
         if let uid {
@@ -894,12 +898,12 @@ final class AudioEngine {
 
     private func setDevice(_ id: AudioObjectID, on node: AVAudioIONode, what: String) throws {
         guard let unit = node.audioUnit else {
-            throw AudioEngineError.coreAudio(-1, "unité audio \(what)")
+            throw AudioEngineError.coreAudio(-1, "\(what) audio unit")
         }
-        // Une unité d'E/S déjà initialisée refuse le changement de device : au
-        // spike, le 3e `start()` d'affilée échouait avec 'nope'
-        // (kAudioHardwareIllegalOperationError) alors que les deux premiers
-        // passaient. Désinitialiser d'abord rend l'opération reproductible.
+        // An already-initialised I/O unit refuses a device change: at the
+        // spike, the 3rd `start()` in a row failed with 'nope'
+        // (kAudioHardwareIllegalOperationError) while the first two went
+        // through. Uninitialising first makes the operation reproducible.
         _ = AudioUnitUninitialize(unit)
         defer { _ = AudioUnitInitialize(unit) }
         var deviceID = id
@@ -922,13 +926,13 @@ final class AudioEngine {
         mixdown.publish(channels: Array(channels.values))
     }
 
-    /// POURQUOI un timer et pas le bloc de rendu : `DominanceMixer.tick` alloue
-    /// (dictionnaire de gains, tableau des flux ouverts) et le thread CoreAudio
-    /// n'a le droit ni d'allouer ni de prendre un verrou long. Le thread audio
-    /// publie donc des sommes de carrés par canal ; ce timer les draine toutes
-    /// les 50 ms (`MIX.tickMs`), appelle le mixeur, et ne renvoie au thread
-    /// audio qu'un Float par canal. Le lissage, lui, reste sur le thread audio,
-    /// seul endroit où `dt` est exact.
+    /// WHY a timer rather than the render block: `DominanceMixer.tick`
+    /// allocates (a gains dictionary, an array of open streams) and the
+    /// CoreAudio thread may neither allocate nor take a long lock. So the audio
+    /// thread publishes per-channel sums of squares; this timer drains them
+    /// every 50 ms (`MIX.tickMs`), calls the mixer, and hands back to the audio
+    /// thread only one Float per channel. The smoothing stays on the audio
+    /// thread, the only place where `dt` is exact.
     private func startTick() {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + tickSec, repeating: tickSec, leeway: .milliseconds(5))
@@ -948,7 +952,7 @@ final class AudioEngine {
 
         switch mixdown.mode {
         case .sum:
-            // « Somme » : tout le monde à 1, seul le limiteur protège (spec).
+            // "Sum": everybody at 1, the limiter alone protects (spec).
             for channel in channels.values { channel.targetGain = 1 }
             dominantID = nil
         case .dominance:
@@ -960,8 +964,8 @@ final class AudioEngine {
         }
 
         if let db = mixdown.drainOutputDb(), let onLevel {
-            // Échelle perceptive : -60 dB → 0, 0 dB → 1. En dessous de -60 dB,
-            // un vu-mètre linéaire en amplitude ne bouge plus du tout.
+            // Perceptual scale: -60 dB → 0, 0 dB → 1. Below -60 dB, a meter
+            // linear in amplitude stops moving altogether.
             let level = max(0, min(1, (db + 60) / 60))
             DispatchQueue.main.async { onLevel(level) }
         }

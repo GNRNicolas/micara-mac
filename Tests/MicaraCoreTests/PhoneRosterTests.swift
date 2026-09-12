@@ -3,7 +3,7 @@ import Testing
 
 @Suite("PhoneRoster")
 struct PhoneRosterTests {
-    @Test func arriveeDonneUnPointVertEtLOrdreEstCeluiDArrivee() {
+    @Test func joiningGivesAGreenDotAndTheOrderIsArrivalOrder() {
         var r = PhoneRoster()
         r.joined(id: "A", nowMs: 0)
         r.joined(id: "B", nowMs: 10)
@@ -12,7 +12,7 @@ struct PhoneRosterTests {
         #expect(r.dots.allSatisfy { $0.state == .connected })
     }
 
-    @Test func perteEtRetourDeMediaGardentLeMemeId() {
+    @Test func losingAndRegainingMediaKeepsTheSameId() {
         var r = PhoneRoster()
         r.joined(id: "A", nowMs: 0)
         r.mediaLost(id: "A", nowMs: 100)
@@ -21,9 +21,9 @@ struct PhoneRosterTests {
         #expect(r.dots == [PhoneDot(id: "A", state: .connected)])
     }
 
-    @Test func perteDeMediaNExpirePas() {
-        // Le téléphone est toujours là (WebSocket ouvert) : effacer son point
-        // reviendrait à effacer un participant présent.
+    @Test func lostMediaNeverExpires() {
+        // The phone is still here (WebSocket open): erasing its dot would erase
+        // a participant who is present.
         var r = PhoneRoster(ghostTTLMs: 1_000)
         r.joined(id: "A", nowMs: 0)
         r.mediaLost(id: "A", nowMs: 100)
@@ -31,21 +31,21 @@ struct PhoneRosterTests {
         #expect(r.dots == [PhoneDot(id: "A", state: .reconnecting)])
     }
 
-    @Test func departDonneUnFantomeQuiDisparaitApresLeTTL() {
+    @Test func leavingGivesAGhostThatDisappearsAfterTheTTL() {
         var r = PhoneRoster(ghostTTLMs: 30_000)
         r.joined(id: "A", nowMs: 0)
         r.left(id: "A", nowMs: 1_000)
         #expect(r.dots == [PhoneDot(id: "A", state: .reconnecting)])
         r.prune(nowMs: 30_000)
-        #expect(r.dots.count == 1)   // 29 s écoulées seulement
+        #expect(r.dots.count == 1)   // only 29 s have elapsed
         r.prune(nowMs: 31_000)
         #expect(r.dots.isEmpty)
     }
 
-    @Test func rejoinRemplaceLeFantomeCarLePhoneIdChange() {
-        // Le serveur tire un phoneId neuf à chaque WebSocket : un téléphone qui
-        // revient n'a plus le même id. Sans remplacement, un seul appareil
-        // afficherait deux points.
+    @Test func rejoiningReplacesTheGhostBecauseThePhoneIdChanges() {
+        // The server draws a fresh phoneId per WebSocket: a phone that comes
+        // back no longer has the same id. Without replacement, a single device
+        // would show two dots.
         var r = PhoneRoster()
         r.joined(id: "A", nowMs: 0)
         r.left(id: "A", nowMs: 1_000)
@@ -53,32 +53,32 @@ struct PhoneRosterTests {
         #expect(r.dots == [PhoneDot(id: "Z", state: .connected)])
     }
 
-    @Test func rejoinRemplaceLeFantomeLePlusAncienEtGardeSaPlace() {
+    @Test func rejoiningReplacesTheOldestGhostAndKeepsItsSlot() {
         var r = PhoneRoster()
         r.joined(id: "A", nowMs: 0)
         r.joined(id: "B", nowMs: 10)
         r.joined(id: "C", nowMs: 20)
-        r.left(id: "B", nowMs: 100)   // fantôme le plus ancien
+        r.left(id: "B", nowMs: 100)   // the oldest ghost
         r.left(id: "C", nowMs: 200)
         r.joined(id: "Z", nowMs: 300)
         #expect(r.dots == [
             PhoneDot(id: "A", state: .connected),
-            PhoneDot(id: "Z", state: .connected),   // a repris la place de B
+            PhoneDot(id: "Z", state: .connected),   // took over B's slot
             PhoneDot(id: "C", state: .reconnecting),
         ])
     }
 
-    @Test func rejoinApresExpirationDuFantomeAjouteUnPointNeuf() {
+    @Test func rejoiningAfterTheGhostExpiredAddsABrandNewDot() {
         var r = PhoneRoster(ghostTTLMs: 1_000)
         r.joined(id: "A", nowMs: 0)
         r.left(id: "A", nowMs: 100)
-        r.joined(id: "Z", nowMs: 5_000) // fantôme périmé → vraie arrivée
+        r.joined(id: "Z", nowMs: 5_000) // ghost expired → a genuine arrival
         #expect(r.dots == [PhoneDot(id: "Z", state: .connected)])
     }
 
-    @Test func arriveeSansFantomeNeTouchePasAuxPointsOrangeDeMedia() {
-        // `mediaLost` n'est pas un départ : un nouveau téléphone ne doit pas
-        // voler la place d'un participant présent mais en reconnexion média.
+    @Test func joiningWithNoGhostLeavesMediaOrangeDotsAlone() {
+        // `mediaLost` is not a departure: a new phone must not steal the slot of
+        // a participant who is present but reconnecting its media.
         var r = PhoneRoster()
         r.joined(id: "A", nowMs: 0)
         r.mediaLost(id: "A", nowMs: 100)
@@ -89,7 +89,7 @@ struct PhoneRosterTests {
         ])
     }
 
-    @Test func joinedSurUnIdDejaConnuLeRepasseAuVert() {
+    @Test func joinedOnAnAlreadyKnownIdTurnsItGreenAgain() {
         var r = PhoneRoster()
         r.joined(id: "A", nowMs: 0)
         r.mediaLost(id: "A", nowMs: 100)
@@ -97,7 +97,7 @@ struct PhoneRosterTests {
         #expect(r.dots == [PhoneDot(id: "A", state: .connected)])
     }
 
-    @Test func evenementSurUnIdInconnuNeCreeRien() {
+    @Test func anEventOnAnUnknownIdCreatesNothing() {
         var r = PhoneRoster()
         r.mediaLost(id: "X", nowMs: 0)
         r.mediaRestored(id: "X", nowMs: 1)

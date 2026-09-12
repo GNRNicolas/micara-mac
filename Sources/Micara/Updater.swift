@@ -1,12 +1,12 @@
 import AppKit
 
-// MARK: - Mises à jour
+// MARK: - Updates
 
-/// Même modèle qu'Eyesaver : une requête anonyme par jour vers la dernière
-/// release GitHub, comparaison de versions. Différence : « Mettre à jour »
-/// fait le travail lui-même (`git pull && ./build.sh --install` dans le
-/// checkout d'origine) au lieu d'ouvrir la page de release. Le script tue
-/// l'app en cours et relance la nouvelle : rien à faire ensuite.
+/// Same model as Eyesaver: one anonymous request a day to the latest GitHub
+/// release, then a version comparison. The difference: **Update** does the work
+/// itself (`git pull && ./build.sh --install` in the original checkout) instead
+/// of opening the release page. The script kills the running app and starts the
+/// new one: nothing left to do afterwards.
 enum Updater {
     static let repository = "GNRNicolas/micara-mac"
     static let homepage = URL(string: "https://github.com/GNRNicolas/micara-mac")!
@@ -22,8 +22,8 @@ enum Updater {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0"
     }
 
-    /// `manual` : déclenché depuis le menu, rapporte aussi « à jour » et
-    /// ignore la limite d'une fois par jour.
+    /// `manual`: triggered from the menu, so it also reports "up to date" and
+    /// ignores the once-a-day limit.
     static func check(manual: Bool) {
         if !manual, let last = lastCheck, Date().timeIntervalSince(last) < checkInterval { return }
         lastCheck = Date()
@@ -34,7 +34,7 @@ enum Updater {
 
         URLSession.shared.dataTask(with: request) { data, _, error in
             if let error {
-                AppLog.write("vérification de mise à jour : \(error.localizedDescription)")
+                AppLog.write("update check: \(error.localizedDescription)")
                 if manual { DispatchQueue.main.async { report(failure: error.localizedDescription) } }
                 return
             }
@@ -42,12 +42,12 @@ enum Updater {
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let tag = json["tag_name"] as? String
             else {
-                AppLog.write("vérification de mise à jour : réponse illisible")
-                if manual { DispatchQueue.main.async { report(failure: "Réponse de GitHub illisible.") } }
+                AppLog.write("update check: unreadable response")
+                if manual { DispatchQueue.main.async { report(failure: "GitHub sent an unreadable response.") } }
                 return
             }
             let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-            AppLog.write("mise à jour : locale \(currentVersion), dernière \(latest)")
+            AppLog.write("update: local \(currentVersion), latest \(latest)")
             DispatchQueue.main.async {
                 if isNewer(latest, than: currentVersion) { offer(version: latest) }
                 else if manual { report(upToDate: currentVersion) }
@@ -55,7 +55,7 @@ enum Updater {
         }.resume()
     }
 
-    /// Comparaison composant par composant : 1.10 bat 1.9.
+    /// Component by component, so 1.10 beats 1.9.
     static func isNewer(_ candidate: String, than current: String) -> Bool {
         let a = candidate.split(separator: ".").map { Int($0) ?? 0 }
         let b = current.split(separator: ".").map { Int($0) ?? 0 }
@@ -69,50 +69,50 @@ enum Updater {
 
     private static func offer(version: String) {
         let alert = NSAlert()
-        alert.messageText = "Micara \(version) est disponible"
-        alert.informativeText = "Vous utilisez la version \(currentVersion). La mise à jour se compile depuis les sources et relance l'app : une minute environ."
-        alert.addButton(withTitle: "Mettre à jour")
-        alert.addButton(withTitle: "Plus tard")
+        alert.messageText = "Micara \(version) is available"
+        alert.informativeText = "You are running version \(currentVersion). The update builds from source and restarts the app: about a minute."
+        alert.addButton(withTitle: "Update")
+        alert.addButton(withTitle: "Later")
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn { install() }
     }
 
-    /// Lance `git pull && ./build.sh --install` dans le checkout d'origine.
-    /// `build.sh --install` tue l'app en cours et relance la nouvelle, donc ce
-    /// process disparaît en route : le résultat est dans le journal.
-    /// Sans checkout connu (app copiée à la main), on ouvre la page de release.
+    /// Runs `git pull && ./build.sh --install` in the original checkout.
+    /// `build.sh --install` kills the running app and starts the new one, so
+    /// this process disappears along the way: the outcome is in the log.
+    /// With no known checkout (app copied by hand), open the release page.
     static func install() {
         guard let source = Settings.sourcePath,
               FileManager.default.fileExists(atPath: source + "/build.sh") else {
-            AppLog.write("mise à jour : checkout introuvable, ouverture de la page de release")
+            AppLog.write("update: checkout not found, opening the release page")
             NSWorkspace.shared.open(homepage.appendingPathComponent("releases/latest"))
             return
         }
         let log = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/micara-update.log").path
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        // Le script tourne détaché de l'app (nohup + &) : quand build.sh tue
-        // l'app, le shell continue jusqu'au relancement.
+        // The script runs detached from the app (nohup + &): when build.sh
+        // kills the app, the shell carries on to the relaunch.
         process.arguments = ["-c", "cd \"\(source)\" && nohup bash -c 'git pull --ff-only && ./build.sh --install' > \"\(log)\" 2>&1 &"]
         do {
             try process.run()
-            AppLog.write("mise à jour lancée depuis \(source), journal \(log)")
+            AppLog.write("update started from \(source), log \(log)")
         } catch {
-            report(failure: "Impossible de lancer la mise à jour : \(error.localizedDescription)")
+            report(failure: "Could not start the update: \(error.localizedDescription)")
         }
     }
 
     private static func report(upToDate version: String) {
         let alert = NSAlert()
-        alert.messageText = "Micara est à jour"
-        alert.informativeText = "Vous utilisez la version \(version)."
+        alert.messageText = "Micara is up to date"
+        alert.informativeText = "You are running version \(version)."
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
     }
 
     private static func report(failure: String) {
         let alert = NSAlert()
-        alert.messageText = "Vérification impossible"
+        alert.messageText = "Could not check for updates"
         alert.informativeText = failure
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()

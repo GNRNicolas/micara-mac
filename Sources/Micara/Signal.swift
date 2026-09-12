@@ -1,27 +1,27 @@
-// Signal.swift — WebSocket de signalisation + un pair WebRTC par téléphone.
+// Signal.swift — signalling WebSocket + one WebRTC peer per phone.
 //
-// Portage de la partie « signal » de `bridge/renderer/src/engine.js` (handleSignal
-// + setupPc) et du transport WS que portait le processus principal Electron.
-// Ici tout est dans le même process : `URLSessionWebSocketTask` remplace `ws`,
-// `LKRTCPeerConnection` remplace `RTCPeerConnection`.
+// Port of the "signal" half of `bridge/renderer/src/engine.js` (handleSignal +
+// setupPc) and of the WS transport that used to live in the Electron main
+// process. Here everything is in one process: `URLSessionWebSocketTask`
+// replaces `ws`, `LKRTCPeerConnection` replaces `RTCPeerConnection`.
 //
-// INVARIANT DE CONCURRENCE : le roster, la table des pairs et les iceServers ne
-// sont touchés que depuis `queue` (une file série). Les callbacks WebRTC
-// arrivent sur des threads quelconques : ils sont tous réinjectés dans `queue`.
-// Les callbacks vers l'UI (`onPhones`, `onState`) partent sur la main queue.
+// CONCURRENCY INVARIANT: the roster, the peer table and the iceServers are
+// touched only from `queue` (a serial queue). WebRTC callbacks arrive on
+// arbitrary threads: every one of them is bounced back onto `queue`. Callbacks
+// towards the UI (`onPhones`, `onState`) leave on the main queue.
 
 import Foundation
 import LiveKitWebRTC
 import MicaraCore
 
-// MARK: - Journal
+// MARK: - Log
 
 // MARK: - Configuration
 
 struct SignalConfig {
-    /// Racine HTTPS du serveur, p. ex. `https://app.getmicara.com`. Le WS en est
-    /// dérivé (`wss://…/ws`) : une seule URL à configurer, pas deux à garder
-    /// cohérentes.
+    /// HTTPS root of the server, e.g. `https://app.getmicara.com`. The WS URL is
+    /// derived from it (`wss://…/ws`): one URL to configure, not two to keep in
+    /// sync.
     var serverURL: URL
     var token: String
 
@@ -54,22 +54,22 @@ final class SignalClient: NSObject {
         case disconnected(code: Int?, reason: String?)
     }
 
-    /// Roster publié à chaque changement (main queue).
+    /// Roster published on every change (main queue).
     var onPhones: (([PhoneDot]) -> Void)?
-    /// État de la connexion (main queue).
+    /// Connection state (main queue).
     var onState: ((State) -> Void)?
-    /// Code d'espace reçu dans le `welcome` (main queue) — c'est lui qui nourrit
-    /// le QR de la barre.
+    /// Space code received in the `welcome` (main queue) — this is what feeds
+    /// the bar's QR.
     var onSecretCode: ((String) -> Void)?
 
     private let config: SignalConfig
     private let audio: AudioEngine
     private let queue = DispatchQueue(label: "com.getmicara.signal")
 
-    /// Une seule factory pour tout le process : elle porte l'ADM (donc le
-    /// playout) et son coût de création est élevé. Créée avec le module
-    /// `.audioEngine` et `bypassVoiceProcessing = true` — l'AEC est faite par
-    /// NOTRE moteur d'entrée ; deux VPIO sur le même micro se marchent dessus.
+    /// One factory for the whole process: it carries the ADM (hence playout)
+    /// and is expensive to create. Built with the `.audioEngine` module and
+    /// `bypassVoiceProcessing = true` — AEC is done by OUR input engine, and two
+    /// VPIO units on the same mic trip over each other.
     private static let factory: LKRTCPeerConnectionFactory = {
         LKRTCPeerConnectionFactory(
             audioDeviceModuleType: .audioEngine,
@@ -88,10 +88,10 @@ final class SignalClient: NSObject {
     private var roster = PhoneRoster(ghostTTLMs: 30_000)
     private var pruneTimer: DispatchSourceTimer?
 
-    /// Reconnexion : 1 s, puis ×2 jusqu'à 30 s. Remis à 1 s à chaque `welcome`.
+    /// Reconnection: 1 s, then ×2 up to 30 s. Reset to 1 s on every `welcome`.
     private var backoff: TimeInterval = 1
     private var reconnectWork: DispatchWorkItem?
-    /// `true` après `disconnect()` ou un code fatal : plus aucune tentative.
+    /// `true` after `disconnect()` or a fatal code: no further attempt.
     private var stopped = false
 
     init(config: SignalConfig, audio: AudioEngine) {
@@ -100,7 +100,7 @@ final class SignalClient: NSObject {
         super.init()
     }
 
-    // MARK: - Cycle de vie
+    // MARK: - Lifecycle
 
     func connect() {
         queue.async { [self] in
@@ -126,7 +126,7 @@ final class SignalClient: NSObject {
             roster = PhoneRoster(ghostTTLMs: 30_000)
             publishRoster()
             emit(.disconnected(code: nil, reason: nil))
-            AppLog.write("[signal] déconnecté (demande locale)")
+            AppLog.write("[signal] disconnected (local request)")
         }
     }
 
@@ -134,8 +134,8 @@ final class SignalClient: NSObject {
 
     private func openSocket() {
         guard let url = config.webSocketURL else {
-            AppLog.write("[signal] URL de serveur invalide : \(config.serverURL)")
-            emit(.disconnected(code: nil, reason: "URL invalide"))
+            AppLog.write("[signal] invalid server URL: \(config.serverURL)")
+            emit(.disconnected(code: nil, reason: "invalid URL"))
             return
         }
         emit(.connecting)
@@ -145,7 +145,7 @@ final class SignalClient: NSObject {
         socket = task
         task.resume()
         receiveNext()
-        AppLog.write("[signal] connexion à \(url.host ?? "?")…")
+        AppLog.write("[signal] connecting to \(url.host ?? "?")…")
     }
 
     private func receiveNext() {
@@ -161,8 +161,8 @@ final class SignalClient: NSObject {
                     }
                     self.receiveNext()
                 case let .failure(error):
-                    // La fermeture propre du serveur arrive ICI aussi : le code
-                    // n'est lisible que sur la tâche, pas dans l'erreur.
+                    // The server's clean close lands HERE too: the code is only
+                    // readable on the task, not in the error.
                     let code = self.socket.map { Int($0.closeCode.rawValue) }
                     self.handleClose(code: code == 0 ? nil : code, reason: error.localizedDescription)
                 }
@@ -174,7 +174,7 @@ final class SignalClient: NSObject {
         guard let data = try? message.encode(),
               let text = String(data: data, encoding: .utf8) else { return }
         socket?.send(.string(text)) { error in
-            if let error { AppLog.write("[signal] envoi échoué : \(error.localizedDescription)") }
+            if let error { AppLog.write("[signal] send failed: \(error.localizedDescription)") }
         }
     }
 
@@ -184,12 +184,12 @@ final class SignalClient: NSObject {
         socket = nil
         session?.invalidateAndCancel()
         session = nil
-        let label = code.flatMap { CloseCode.describe($0) } ?? reason ?? "cause inconnue"
+        let label = code.flatMap { CloseCode.describe($0) } ?? reason ?? "unknown cause"
         emit(.disconnected(code: code, reason: label))
 
-        // Codes FATALS : le jeton, l'espace ou le compte sont en cause. Retenter
-        // ne peut rien réparer et martèlerait le serveur (`authLimiter`) avec un
-        // jeton invalide — on s'arrête et on remonte, l'utilisateur doit agir.
+        // FATAL codes: the token, the space or the account is at fault.
+        // Retrying can fix nothing and would hammer the server (`authLimiter`)
+        // with an invalid token — we stop and report, the user must act.
         let fatal = [
             CloseCode.invalidToken, CloseCode.bridgeAlreadyConnected,
             CloseCode.spaceDisabled, CloseCode.accountDisabled, CloseCode.adminDisconnect,
@@ -198,11 +198,11 @@ final class SignalClient: NSObject {
             stopped = true
             pruneTimer?.cancel()
             pruneTimer = nil
-            AppLog.write("[signal] fermeture FATALE \(code) (\(label)) — pas de reconnexion")
+            AppLog.write("[signal] FATAL close \(code) (\(label)) — no reconnection")
             return
         }
 
-        AppLog.write("[signal] fermeture \(code.map(String.init) ?? "?") (\(label)) — nouvelle tentative dans \(Int(backoff)) s")
+        AppLog.write("[signal] close \(code.map(String.init) ?? "?") (\(label)) — retrying in \(Int(backoff)) s")
         let work = DispatchWorkItem { [weak self] in
             guard let self, !stopped else { return }
             openSocket()
@@ -216,7 +216,7 @@ final class SignalClient: NSObject {
 
     private func handle(data: Data) {
         guard let message = try? IncomingMessage.decode(data) else {
-            AppLog.write("[signal] message illisible ignoré")
+            AppLog.write("[signal] unreadable message ignored")
             return
         }
         switch message {
@@ -224,28 +224,28 @@ final class SignalClient: NSObject {
             iceServers = servers
             backoff = 1
             emit(.connected)
-            // Reconnexion du bridge : les anciens pairs sont morts avec le WS et
-            // les téléphones vont ré-offrir. Repartir propre, sinon un
-            // setRemoteDescription tombe sur un pair `failed`.
+            // Bridge reconnection: the old peers died with the WS and the
+            // phones are about to re-offer. Start clean, otherwise a
+            // setRemoteDescription lands on a `failed` peer.
             closeAllPeers()
             roster = PhoneRoster(ghostTTLMs: 30_000)
             publishRoster()
             if let secretCode {
                 DispatchQueue.main.async { [weak self] in self?.onSecretCode?(secretCode) }
             }
-            AppLog.write("[signal] welcome — \(servers.count) serveurs ICE")
+            AppLog.write("[signal] welcome — \(servers.count) ICE servers")
 
         case let .phoneJoined(phoneId):
             roster.joined(id: phoneId, nowMs: nowMs())
             publishRoster()
-            AppLog.write("[signal] téléphone \(phoneId) : arrivé")
+            AppLog.write("[signal] phone \(phoneId): joined")
 
         case let .phoneLeft(phoneId):
             closePeer(phoneId)
             audio.removePhone(id: phoneId)
             roster.left(id: phoneId, nowMs: nowMs())
             publishRoster()
-            AppLog.write("[signal] téléphone \(phoneId) : parti")
+            AppLog.write("[signal] phone \(phoneId): left")
 
         case let .offer(phoneId, sdp):
             answer(phoneId: phoneId, offer: sdp)
@@ -258,15 +258,15 @@ final class SignalClient: NSObject {
                 sdpMid: candidate.sdpMid
             )
             pc.add(ice) { error in
-                if let error { AppLog.write("[signal] ICE \(phoneId) refusé : \(error.localizedDescription)") }
+                if let error { AppLog.write("[signal] ICE \(phoneId) rejected: \(error.localizedDescription)") }
             }
 
         case let .unknown(type):
-            AppLog.write("[signal] type inconnu ignoré : \(type)")
+            AppLog.write("[signal] unknown type ignored: \(type)")
         }
     }
 
-    // MARK: - Pairs WebRTC
+    // MARK: - WebRTC peers
 
     private func peerConnection(for phoneId: String) -> LKRTCPeerConnection? {
         if let existing = pcs[phoneId] { return existing }
@@ -280,7 +280,7 @@ final class SignalClient: NSObject {
         guard let pc = Self.factory.peerConnection(
             with: configuration, constraints: constraints, delegate: handle
         ) else {
-            AppLog.write("[signal] impossible de créer le pair \(phoneId)")
+            AppLog.write("[signal] could not create peer \(phoneId)")
             return nil
         }
         pcs[phoneId] = pc
@@ -294,25 +294,25 @@ final class SignalClient: NSObject {
         pc.setRemoteDescription(remote) { [weak self] error in
             guard let self else { return }
             if let error {
-                AppLog.write("[signal] setRemoteDescription \(phoneId) : \(error.localizedDescription)")
+                AppLog.write("[signal] setRemoteDescription \(phoneId): \(error.localizedDescription)")
                 return
             }
             let constraints = LKRTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
             pc.answer(for: constraints) { [weak self] sdp, error in
                 guard let self, let sdp else {
-                    AppLog.write("[signal] createAnswer \(phoneId) : \(error?.localizedDescription ?? "?")")
+                    AppLog.write("[signal] createAnswer \(phoneId): \(error?.localizedDescription ?? "?")")
                     return
                 }
                 pc.setLocalDescription(sdp) { [weak self] error in
                     guard let self else { return }
                     if let error {
-                        AppLog.write("[signal] setLocalDescription \(phoneId) : \(error.localizedDescription)")
+                        AppLog.write("[signal] setLocalDescription \(phoneId): \(error.localizedDescription)")
                         return
                     }
                     queue.async {
                         self.send(.answer(phoneId: phoneId,
                                           sdp: SessionDescription(type: "answer", sdp: sdp.sdp)))
-                        AppLog.write("[signal] answer envoyée à \(phoneId)")
+                        AppLog.write("[signal] answer sent to \(phoneId)")
                     }
                 }
             }
@@ -333,17 +333,17 @@ final class SignalClient: NSObject {
         handles.removeAll()
     }
 
-    // MARK: - Callbacks des pairs (toujours réinjectés dans `queue`)
+    // MARK: - Peer callbacks (always bounced back onto `queue`)
 
     fileprivate func peerDidReceive(track: LKRTCAudioTrack, phoneId: String) {
         queue.async { [self] in
             guard pcs[phoneId] != nil else { return }
-            // PIÈGE `engine.js` : `ontrack` PRÉCÈDE `ICE connected`. On branche
-            // quand même — attendre l'état connecté fait rater le début de la
-            // parole, et la piste ne livrera simplement rien avant l'arrivée
-            // des premiers paquets.
+            // `engine.js` TRAP: `ontrack` comes BEFORE `ICE connected`. We hook
+            // it up anyway — waiting for the connected state misses the start of
+            // speech, and the track simply delivers nothing until the first
+            // packets arrive.
             audio.addPhone(id: phoneId, track: track)
-            AppLog.write("[signal] téléphone \(phoneId) : piste branchée au mixeur")
+            AppLog.write("[signal] phone \(phoneId): track wired into the mixer")
         }
     }
 
@@ -361,27 +361,27 @@ final class SignalClient: NSObject {
         queue.async { [self] in
             switch iceState {
             case .disconnected:
-                // Transitoire : se répare souvent tout seul. On l'affiche en
-                // orange (point « en reconnexion ») mais on n'alerte pas le
-                // serveur — le JS ne signalait `live:false` que sur `failed`.
+                // Transient: it often heals by itself. We show it in orange (a
+                // "reconnecting" dot) but do not alert the server — the JS only
+                // reported `live:false` on `failed`.
                 roster.mediaLost(id: phoneId, nowMs: nowMs())
                 publishRoster()
-                AppLog.write("[signal] téléphone \(phoneId) : liaison perdue (transitoire)")
+                AppLog.write("[signal] phone \(phoneId): link lost (transient)")
             case .connected, .completed:
                 roster.mediaRestored(id: phoneId, nowMs: nowMs())
                 publishRoster()
                 send(.streamState(phoneId: phoneId, live: true))
-                AppLog.write("[signal] téléphone \(phoneId) : liaison établie")
+                AppLog.write("[signal] phone \(phoneId): link established")
             case .failed, .closed:
-                // LA PANNE DOIT SE VOIR (06/09) : un micro de salle qui lâche en
-                // silence est pire qu'un micro qui lâche. On le dit au journal,
-                // au roster (le point disparaît après 30 s) et au serveur.
+                // A FAILURE MUST BE VISIBLE (06/09): a room mic that dies
+                // silently is worse than a mic that dies. We say so in the log,
+                // in the roster (the dot goes after 30 s) and to the server.
                 closePeer(phoneId)
                 audio.removePhone(id: phoneId)
                 roster.left(id: phoneId, nowMs: nowMs())
                 publishRoster()
                 send(.streamState(phoneId: phoneId, live: false))
-                AppLog.write("[signal] téléphone \(phoneId) : connexion perdue — ne transmet plus")
+                AppLog.write("[signal] phone \(phoneId): connection lost — no longer transmitting")
             default:
                 break
             }
@@ -390,9 +390,9 @@ final class SignalClient: NSObject {
 
     // MARK: - Roster
 
-    /// Le roster vieillit tout seul : un fantôme disparaît 30 s après sa perte.
-    /// Sans ce timer, un point orange resterait affiché indéfiniment tant
-    /// qu'aucun autre événement ne provoquerait un `prune`.
+    /// The roster ages on its own: a ghost disappears 30 s after it was lost.
+    /// Without this timer an orange dot would stay on screen forever, as long as
+    /// no other event triggered a `prune`.
     private func startPruneTimer() {
         guard pruneTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -418,7 +418,7 @@ final class SignalClient: NSObject {
     private func nowMs() -> Double { Date().timeIntervalSince1970 * 1000 }
 }
 
-// MARK: - Fermeture WebSocket
+// MARK: - WebSocket close
 
 extension SignalClient: URLSessionWebSocketDelegate {
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
@@ -432,11 +432,11 @@ extension SignalClient: URLSessionWebSocketDelegate {
     }
 }
 
-// MARK: - Délégué d'un pair
+// MARK: - Peer delegate
 
-/// Un délégué par téléphone : c'est lui qui porte le `phoneId`, que l'API
-/// WebRTC ne transporte nulle part. Objet distinct du client pour ne pas avoir
-/// à retrouver le téléphone par identité de `LKRTCPeerConnection`.
+/// One delegate per phone: it is what carries the `phoneId`, which the WebRTC
+/// API transports nowhere. A separate object from the client so we never have
+/// to find the phone back by `LKRTCPeerConnection` identity.
 private final class PeerHandle: NSObject, LKRTCPeerConnectionDelegate {
     let phoneId: String
     weak var client: SignalClient?

@@ -1,16 +1,16 @@
-// Micara — messages WebSocket entre le bridge et le serveur de signal.
+// Micara — WebSocket messages between the bridge and the signalling server.
 //
-// Formes JSON reprises telles quelles de `server/signal.js` (branche
-// `role === 'bridge'`) et de `bridge/renderer/src/engine.js`. Le serveur n'a
-// pas changé pour cette réécriture Swift : toute divergence de nom de champ
-// casse la négociation WebRTC en silence (le téléphone reste « en attente du
-// bridge »), d'où le portage littéral et les tests sur JSON réels.
+// JSON shapes lifted verbatim from `server/signal.js` (the `role === 'bridge'`
+// branch) and from `bridge/renderer/src/engine.js`. The server did not change
+// for this Swift rewrite: any field-name drift breaks WebRTC negotiation
+// silently (the phone stays "waiting for the bridge"), hence the literal port
+// and the tests over real JSON.
 
 import Foundation
 
-// MARK: - Types partagés
+// MARK: - Shared types
 
-/// Serveur ICE/TURN reçu dans le `welcome` (credentials Cloudflare, TTL 1 h).
+/// ICE/TURN server received in the `welcome` (Cloudflare credentials, 1 h TTL).
 public struct IceServer: Codable, Equatable {
     public let urls: [String]
     public let username: String?
@@ -24,8 +24,9 @@ public struct IceServer: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey { case urls, username, credential }
 
-    // `urls` arrive en chaîne OU en tableau selon la source (l'API Cloudflare
-    // renvoie les deux formes, `server/turn.js` ne normalise que la sienne).
+    // `urls` arrives as a string OR an array depending on the source (the
+    // Cloudflare API returns both shapes, `server/turn.js` only normalises its
+    // own).
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         if let one = try? c.decode(String.self, forKey: .urls) {
@@ -45,8 +46,8 @@ public struct IceServer: Codable, Equatable {
     }
 }
 
-/// `{ type, sdp }` — la forme sérialisée d'un RTCSessionDescription
-/// (`serializeAnswer` côté renderer).
+/// `{ type, sdp }` — the serialised form of an RTCSessionDescription
+/// (`serializeAnswer` on the renderer side).
 public struct SessionDescription: Codable, Equatable {
     public let type: String
     public let sdp: String
@@ -58,9 +59,9 @@ public struct SessionDescription: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey { case type, sdp }
 
-    // Tolérance historique : `signal.js` journalise `msg.sdp && msg.sdp.sdp ||
-    // msg.sdp`, donc une chaîne nue a déjà circulé. On l'accepte plutôt que
-    // d'échouer, en supposant une offre (le bridge ne reçoit que des offres).
+    // Historical tolerance: `signal.js` logs `msg.sdp && msg.sdp.sdp ||
+    // msg.sdp`, so a bare string has already been seen on the wire. We accept
+    // it rather than fail, assuming an offer (the bridge only receives offers).
     public init(from decoder: Decoder) throws {
         if let raw = try? decoder.singleValueContainer().decode(String.self) {
             type = "offer"
@@ -73,7 +74,7 @@ public struct SessionDescription: Codable, Equatable {
     }
 }
 
-/// `{ candidate, sdpMid, sdpMLineIndex }` — `serializeCandidate` côté renderer.
+/// `{ candidate, sdpMid, sdpMLineIndex }` — `serializeCandidate` on the renderer side.
 public struct IceCandidate: Codable, Equatable {
     public let candidate: String
     public let sdpMid: String?
@@ -86,7 +87,7 @@ public struct IceCandidate: Codable, Equatable {
     }
 }
 
-// MARK: - Serveur → bridge
+// MARK: - Server → bridge
 
 public enum IncomingMessage: Equatable {
     case welcome(secretCode: String?, iceServers: [IceServer])
@@ -94,7 +95,7 @@ public enum IncomingMessage: Equatable {
     case phoneLeft(phoneId: String)
     case offer(phoneId: String, sdp: SessionDescription)
     case ice(phoneId: String, candidate: IceCandidate)
-    /// Type non reconnu : le serveur peut en ajouter, le bridge doit survivre.
+    /// Unrecognised type: the server may add new ones, the bridge must survive.
     case unknown(type: String)
 
     private struct Envelope: Decodable {
@@ -107,8 +108,8 @@ public enum IncomingMessage: Equatable {
         let candidate: IceCandidate?
     }
 
-    /// Décode par le champ `type`. Un message inconnu ou incomplet ne doit
-    /// jamais faire tomber la connexion : il devient `.unknown`.
+    /// Decodes on the `type` field. An unknown or incomplete message must never
+    /// bring the connection down: it becomes `.unknown`.
     public static func decode(_ data: Data) throws -> IncomingMessage {
         let env = try JSONDecoder().decode(Envelope.self, from: data)
         switch env.type {
@@ -132,14 +133,14 @@ public enum IncomingMessage: Equatable {
     }
 }
 
-// MARK: - Bridge → serveur
+// MARK: - Bridge → server
 
 public enum OutgoingMessage: Equatable {
     case answer(phoneId: String, sdp: SessionDescription)
     case ice(phoneId: String, candidate: IceCandidate)
-    /// État du FLUX d'un téléphone tel que le bridge le vit — distinct de sa
-    /// présence WebSocket : une liaison WebRTC peut mourir sans que le
-    /// téléphone parte. Le serveur s'en sert pour ses journaux.
+    /// State of a phone's STREAM as the bridge sees it — distinct from its
+    /// WebSocket presence: a WebRTC link can die without the phone leaving. The
+    /// server uses it for its logs.
     case streamState(phoneId: String, live: Bool)
 
     private struct Payload: Encodable {
@@ -166,10 +167,10 @@ public enum OutgoingMessage: Equatable {
     }
 }
 
-// MARK: - Codes de fermeture WebSocket
+// MARK: - WebSocket close codes
 
-/// Table du README racine. Le bridge les affiche à l'utilisateur : un code non
-/// traduit devient un « déconnecté » muet, qu'on ne sait pas diagnostiquer.
+/// Table from the root README. The bridge shows these to the user: an
+/// untranslated code becomes a mute "disconnected" that nobody can diagnose.
 public enum CloseCode {
     public static let missingParam = 4000
     public static let invalidToken = 4001
@@ -180,21 +181,21 @@ public enum CloseCode {
     public static let accountDisabled = 4006
     public static let adminDisconnect = 4007
     public static let spaceFull = 4008
-    /// Hors table du README mais émis par `signal.js` vers le bridge.
+    /// Not in the README table, but emitted by `signal.js` towards the bridge.
     public static let meetingEnded = 4010
 
     public static func describe(_ code: Int) -> String? {
         switch code {
-        case missingParam: return "paramètre manquant"
-        case invalidToken: return "jeton invalide"
-        case spaceNotFound: return "espace introuvable"
-        case bridgeAlreadyConnected: return "un autre bridge est déjà connecté"
-        case invalidCode: return "code invalide"
-        case spaceDisabled: return "espace désactivé"
-        case accountDisabled: return "compte désactivé"
-        case adminDisconnect: return "déconnexion admin"
-        case spaceFull: return "espace plein"
-        case meetingEnded: return "réunion terminée"
+        case missingParam: return "missing parameter"
+        case invalidToken: return "invalid token"
+        case spaceNotFound: return "space not found"
+        case bridgeAlreadyConnected: return "another bridge is already connected"
+        case invalidCode: return "invalid code"
+        case spaceDisabled: return "space disabled"
+        case accountDisabled: return "account disabled"
+        case adminDisconnect: return "admin disconnect"
+        case spaceFull: return "space full"
+        case meetingEnded: return "meeting ended"
         default: return nil
         }
     }

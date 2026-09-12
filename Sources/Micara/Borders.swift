@@ -1,10 +1,10 @@
 import AppKit
 import QuartzCore
 
-// MARK: - Liseré d'écran
+// MARK: - Screen border
 
-/// Anneau bleu autour d'un écran. Purement décoratif : la fenêtre qui le porte
-/// laisse passer tous les clics.
+/// Blue ring around a screen. Purely decorative: the window carrying it lets
+/// every click through.
 private final class BorderView: NSView {
     private let ring = CAShapeLayer()
 
@@ -12,9 +12,9 @@ private final class BorderView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = .clear
-        // Un anneau REMPLI, pas un trait. Un trait est centré sur son tracé,
-        // donc ses deux bords partagent un même rayon ; arrondir le bord
-        // extérieur laisse un vide dans les coins bas carrés de l'écran.
+        // A FILLED ring, not a stroke. A stroke is centred on its path, so
+        // both its edges share one radius; rounding the outer edge leaves a gap
+        // in the square bottom corners of the screen.
         ring.fillColor = Style.accent.cgColor
         ring.fillRule = .evenOdd
         ring.strokeColor = nil
@@ -32,28 +32,28 @@ private final class BorderView: NSView {
         super.layout()
         let w = Style.borderWidth
         let path = CGMutablePath()
-        path.addRect(bounds)                                     // extérieur : carré
+        path.addRect(bounds)                                     // outer: square
         path.addPath(CGPath(roundedRect: bounds.insetBy(dx: w, dy: w),
                             cornerWidth: Style.borderInnerRadius,
                             cornerHeight: Style.borderInnerRadius,
-                            transform: nil))                     // intérieur : arrondi
+                            transform: nil))                     // inner: rounded
         ring.frame = bounds
         ring.path = path
     }
 }
 
-/// Le liseré, une fenêtre par écran.
+/// The border, one window per screen.
 ///
-/// Différences avec Eyesaver : couleur d'accent, opacité fixe (une réunion dure
-/// longtemps, une pulsation deviendrait un supplice) et épaisseur moitié.
+/// Differences from Eyesaver: accent colour, fixed opacity (a meeting lasts a
+/// long time, a pulse would become torture) and half the thickness.
 final class Borders {
     private var windows: [NSWindow] = []
     private(set) var visible = false
     private var screenObserver: NSObjectProtocol?
 
     init() {
-        // Un écran branché ou débranché pendant la réunion ne doit pas laisser
-        // un écran nu : on reconstruit à l'identique.
+        // A display plugged or unplugged mid-meeting must not leave a bare
+        // screen: we rebuild identically.
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil, queue: .main
@@ -82,8 +82,8 @@ final class Borders {
         }, completionHandler: { leaving.forEach { $0.orderOut(nil) } })
     }
 
-    /// Refait une fenêtre par écran après un changement d'agencement. Sans
-    /// fondu : c'est un remplacement, pas une apparition.
+    /// Rebuilds one window per screen after a layout change. No fade: this is
+    /// a replacement, not an appearance.
     private func rebuild() {
         guard visible else { return }
         windows.forEach { $0.orderOut(nil) }
@@ -99,7 +99,7 @@ final class Borders {
             window.backgroundColor = .clear
             window.hasShadow = false
             window.level = .screenSaver
-            // Click-through : le liseré ne doit jamais gêner le travail.
+            // Click-through: the border must never get in the way of work.
             window.ignoresMouseEvents = true
             window.collectionBehavior = [.canJoinAllSpaces, .stationary,
                                          .fullScreenAuxiliary, .ignoresCycle]
