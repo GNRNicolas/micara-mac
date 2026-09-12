@@ -4,6 +4,10 @@
 
 <h1 align="center">Micara</h1>
 
+```sh
+git clone https://github.com/GNRNicolas/micara-mac.git && cd micara-mac && ./build.sh --install
+```
+
 The phones in the room become the microphones of your Teams, Zoom or Meet
 meeting. Micara lives in the Mac menu bar; during a meeting a blue border
 surrounds the screen and a small bar at the bottom shows the sound going
@@ -13,14 +17,11 @@ through.
 
 ## Install
 
-```sh
-git clone https://github.com/GNRNicolas/micara-mac.git && cd micara-mac && ./build.sh --install
-```
-
-Builds the app, puts it in `/Applications` and starts it. Needs macOS 13+ and
-the Xcode command line tools (`xcode-select --install`). Your password is asked
-once, to install **BlackHole**, the virtual microphone Micara writes into: a
-system driver, and no app can put one in place without it.
+The command above builds the app, puts it in `/Applications` and starts it.
+Needs macOS 13+ and the Xcode command line tools (`xcode-select --install`).
+Your password is asked once, to install **BlackHole**, the virtual microphone
+Micara writes into: a system driver, and no app can put one in place without
+it.
 
 No window, no Dock icon. Look for the Micara logo in the menu bar.
 
