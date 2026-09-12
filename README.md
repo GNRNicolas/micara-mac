@@ -5,7 +5,6 @@
 <h1 align="center">Micara</h1>
 
 ## Install
-
 The command bellow builds the app, puts it in `/Applications` and starts it.
 Needs macOS 13+ and the Xcode command line tools (`xcode-select --install`).
 Your password is asked once, to install **BlackHole**, the virtual microphone
