@@ -106,7 +106,7 @@ enum Style {
     /// Side of the QR block on the exported card, in the template's own PIXELS
     /// (the template is 1800x1800), centred. Not points: the card is rendered
     /// 1:1 into a bitmap, never through a 2x backing scale.
-    static let cardQRSide: CGFloat = 400
+    static let cardQRSide: CGFloat = 800
     /// Quiet zone, in modules, kept INSIDE `cardQRSide`. Four is the spec's
     /// minimum; without it a scanner has no edge to lock onto, whatever the
     /// card's background looks like.
