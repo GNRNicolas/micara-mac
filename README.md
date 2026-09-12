@@ -31,7 +31,7 @@ for the microphone in the menu bar, near the clock.
    the previous one back at the end.
 2. Micara menu → **Start a Meeting**. The blue border appears, the bar slides
    up.
-3. Hover the bar: a QR code unfolds. Each participant scans it with their
+3. Hover the QR icon in the bar: the QR code unfolds (click it to keep it open). Each participant scans it with their
    phone, allows the microphone, and that is it. One green dot per connected
    phone; orange if it drops, and it disappears if it does not come back.
 4. **Mute Phones** mutes every phone at once, the Mac's microphone keeps going.
@@ -49,7 +49,7 @@ Menu → **Mixing**:
 | Dominance + gate (default) | The loudest phone speaks, the others are ducked by 18 dB. A noise gate mutes the phones lying on the table that only hear the room. |
 | Sum | Every stream added together, with a limiter to avoid clipping. |
 
-The Mac's microphone is always in the mix, with the macOS echo cancellation.
+The Mac's microphone is always in the mix. Echo cancellation is left to Teams/Zoom: macOS only offers its own on the default input, which is Micara itself during a meeting.
 
 ## Permissions
 
