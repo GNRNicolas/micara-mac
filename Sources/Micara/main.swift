@@ -88,6 +88,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
         source.setEventHandler { [weak self] in self?.toggleMeeting() }
         source.resume()
         signalSources.append(source)
+
+        // USR2: pins the QR panel, then opens the menu for 5 s. Used to take the
+        // README screenshots with `screencapture` — nothing user-facing.
+        Darwin.signal(SIGUSR2, SIG_IGN)
+        let docs = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
+        docs.setEventHandler { [weak self] in
+            guard let self else { return }
+            bar.pinQR()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self, let menu = statusItem.menu else { return }
+                // `performClick` blocks while the menu tracks, in the event
+                // tracking run-loop mode: GCD main-queue blocks do NOT run
+                // there (measured: the menu stayed open, nothing captured).
+                // Timers added to `.common` do.
+                let capture = Timer(timeInterval: 1.0, repeats: false) { _ in Self.captureOwnWindows() }
+                let dismiss = Timer(timeInterval: 4.0, repeats: false) { _ in menu.cancelTracking() }
+                RunLoop.main.add(capture, forMode: .common)
+                RunLoop.main.add(dismiss, forMode: .common)
+                statusItem.button?.performClick(nil)
+            }
+        }
+        docs.resume()
+        signalSources.append(docs)
+    }
+
+    /// Writes a PNG of every on-screen window of this process into
+    /// `~/Library/Logs/micara-shots/`. An app may image its OWN windows without
+    /// the Screen Recording permission, which `screencapture` from a terminal
+    /// does not have.
+    private static func captureOwnWindows() {
+        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/micara-shots", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        for info in list where (info[kCGWindowOwnerPID as String] as? Int32) == pid {
+            guard let number = info[kCGWindowNumber as String] as? UInt32,
+                  let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  let image = CGWindowListCreateImage(.null, .optionIncludingWindow, number, [.boundsIgnoreFraming, .bestResolution])
+            else { continue }
+            let name = "win-\(Int(bounds["Width"] ?? 0))x\(Int(bounds["Height"] ?? 0))-\(number).png"
+            let rep = NSBitmapImageRep(cgImage: image)
+            guard let data = rep.representation(using: .png, properties: [:]) else { continue }
+            try? data.write(to: dir.appendingPathComponent(name))
+        }
+        AppLog.write("docs: windows captured into \(dir.path)")
     }
 
     // MARK: Registration
