@@ -61,6 +61,16 @@ enum Style {
     static let pillLeftInset: CGFloat = 16
     static let pillRightInset: CGFloat = 14
 
+    // MARK: Collapsed tab
+
+    /// Width of the stub left sticking out of the screen edge once the bar is
+    /// collapsed. Wide enough to be an easy target, narrow enough that nobody
+    /// mistakes it for a window.
+    static let tabWidth: CGFloat = 28
+    /// Width of the icon-only buttons (the two chevrons). Fixed like every
+    /// other element: the pill's width must not depend on what is drawn.
+    static let chevronWidth: CGFloat = 24
+
     // MARK: Level meter
 
     static let meterWidth: CGFloat = 56

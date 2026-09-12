@@ -13,6 +13,24 @@ import MicaraCore
 /// ignores the layer mask — hence the visible box around the pill. `maskImage`
 /// is the only clip compositing respects, and the window shadow follows it.
 class PillBackground: NSVisualEffectView {
+    /// Which corners are rounded.
+    enum Corners {
+        /// The floating pill.
+        case all
+        /// The collapsed tab. It sits flush against the screen edge, so its
+        /// left corners must be square: rounding them would leave two slivers
+        /// of desktop between the tab and the bezel.
+        case rightOnly
+    }
+
+    var corners: Corners = .all {
+        didSet {
+            guard corners != oldValue else { return }
+            applyMask()
+            needsLayout = true
+        }
+    }
+
     private let outline = CAShapeLayer()
 
     override init(frame frameRect: NSRect) {
@@ -25,20 +43,58 @@ class PillBackground: NSVisualEffectView {
         outline.strokeColor = Style.ink.withAlphaComponent(0.14).cgColor
         outline.lineWidth = 1
         layer?.addSublayer(outline)
-        maskImage = PillBackground.mask(radius: Style.pillRadius)
+        applyMask()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func layout() {
         super.layout()
+        // The `rightOnly` mask is cut to an exact size, so it has to be redrawn
+        // whenever the view resizes — which is every frame of the collapse
+        // animation. The `all` mask is stretchable and costs nothing.
+        if corners == .rightOnly { applyMask() }
         // The hairline must be its own `CAShapeLayer`: `layer.borderWidth`
         // would stay rectangular, the mask does not apply to it.
         outline.frame = bounds
-        outline.path = CGPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
-                              cornerWidth: Style.pillRadius,
-                              cornerHeight: Style.pillRadius,
-                              transform: nil)
+        outline.path = outlinePath()
+    }
+
+    private func outlinePath() -> CGPath {
+        let radius = Style.pillRadius
+        let box = bounds.insetBy(dx: 0.5, dy: 0.5)
+        switch corners {
+        case .all:
+            return CGPath(roundedRect: box, cornerWidth: radius, cornerHeight: radius, transform: nil)
+        case .rightOnly:
+            // Same trick as the mask: the rectangle is extended past the left
+            // edge so its left rounding falls outside the view.
+            let stretched = NSRect(x: box.minX - radius, y: box.minY,
+                                   width: box.width + radius, height: box.height)
+            return CGPath(roundedRect: stretched, cornerWidth: radius, cornerHeight: radius, transform: nil)
+        }
+    }
+
+    private func applyMask() {
+        switch corners {
+        case .all:
+            maskImage = PillBackground.mask(radius: Style.pillRadius)
+        case .rightOnly:
+            maskImage = PillBackground.tabMask(radius: Style.pillRadius, size: bounds.size)
+        }
+    }
+
+    /// Exact-size mask for the collapsed tab: a rounded rectangle whose left
+    /// half is pushed out of the image, leaving square left corners.
+    private static func tabMask(radius: CGFloat, size: NSSize) -> NSImage? {
+        guard size.width > 1, size.height > 1 else { return nil }
+        return NSImage(size: size, flipped: false) { rect in
+            NSColor.black.setFill()
+            let stretched = NSRect(x: rect.minX - radius, y: rect.minY,
+                                   width: rect.width + radius, height: rect.height)
+            NSBezierPath(roundedRect: stretched, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
     }
 
     /// Stretchable image: the four corners are preserved, the centre stretches.
@@ -89,10 +145,15 @@ final class PillButton: NSButton {
     /// the bar has no hue of its own.
     var tinted = false { didSet { attributedTitle = makeTitle(); paint() } }
 
+    /// Icon-only variant: no title, a fixed square-ish footprint, and the same
+    /// hover fill as the secondary style.
+    private let symbol: String?
+
     init(labels: [String], prominent: Bool, target: AnyObject, action: Selector) {
         self.candidates = labels
         self.label = labels[0]
         self.prominent = prominent
+        self.symbol = nil
         super.init(frame: .zero)
         self.target = target
         self.action = action
@@ -103,7 +164,34 @@ final class PillButton: NSButton {
         paint()
     }
 
+    init(symbol: String, accessibility: String, target: AnyObject, action: Selector) {
+        self.candidates = []
+        self.label = ""
+        self.prominent = false
+        self.symbol = symbol
+        super.init(frame: .zero)
+        self.target = target
+        self.action = action
+        isBordered = false
+        wantsLayer = true
+        layer?.masksToBounds = true
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: accessibility)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .semibold))
+        imagePosition = .imageOnly
+        imageScaling = .scaleNone
+        attributedTitle = NSAttributedString(string: "")
+        paint()
+    }
+
     required init?(coder: NSCoder) { fatalError() }
+
+    // The app is never active. Without this the first click on a chevron would
+    // be spent waking the app up and would collapse nothing.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
 
     func update(label newLabel: String) {
         guard newLabel != label else { return }
@@ -123,8 +211,10 @@ final class PillButton: NSButton {
         ])
     }
 
-    /// Width frozen once and for all, on the longest possible label.
+    /// Width frozen once and for all, on the longest possible label (or on the
+    /// icon's fixed box).
     override var intrinsicContentSize: NSSize {
+        if symbol != nil { return NSSize(width: Style.chevronWidth, height: 30) }
         let widest = candidates
             .map { NSAttributedString(string: $0, attributes: [.font: PillButton.font]).size().width }
             .max() ?? 0
@@ -137,6 +227,13 @@ final class PillButton: NSButton {
     }
 
     private func paint() {
+        if symbol != nil {
+            // Same ink tint as the QR icon, so the pill's two icon controls
+            // read as the same family.
+            contentTintColor = Style.ink.withAlphaComponent(hovered ? 0.85 : 0.55)
+            layer?.backgroundColor = Style.ink.withAlphaComponent(hovered ? 0.16 : 0).cgColor
+            return
+        }
         let fill: NSColor
         if prominent {
             fill = hovered ? Style.ink : Style.ink.withAlphaComponent(0.88)
@@ -465,6 +562,21 @@ final class Bar {
                                              target: self, action: #selector(toggleMute))
     private lazy var endButton = PillButton(labels: ["End"], prominent: true,
                                             target: self, action: #selector(end))
+    /// Sends the bar to the left edge. Last in the row, so it reads as "push
+    /// all of this out of the way" rather than as one more meeting control.
+    private lazy var collapseButton = PillButton(symbol: "chevron.left",
+                                                 accessibility: "Collapse the bar",
+                                                 target: self, action: #selector(collapse))
+    /// The whole content of the collapsed tab.
+    private lazy var expandButton = PillButton(symbol: "chevron.right",
+                                               accessibility: "Expand the bar",
+                                               target: self, action: #selector(expand))
+    /// The expanded row, kept so its width can be frozen and its alpha animated.
+    private var row = NSStackView()
+    /// Width of the expanded pill, measured once. The row is pinned by its
+    /// leading edge only, so the window can narrow without the stack reflowing
+    /// and squashing its content mid-animation.
+    private var expandedWidth: CGFloat = 0
 
     private lazy var pill: PillBackground = buildPill()
     private lazy var panel: NSPanel = buildPanel()
@@ -488,6 +600,10 @@ final class Bar {
     /// The QR stays unfolded after a click on the icon, so people can scan
     /// without the mouse having to sit on it.
     private(set) var isQRPinned = false
+    /// Folded away against the left edge. Per meeting, never persisted:
+    /// `show()` always starts expanded, because a bar nobody can see is a bar
+    /// nobody remembers hiding.
+    private(set) var isCollapsed = false
 
     init(delegate: BarDelegate) {
         self.delegate = delegate
@@ -512,21 +628,34 @@ final class Bar {
             view.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
 
-        let row = NSStackView(views: [icon, meter, qrToggle, dots, muteButton, endButton])
+        row = NSStackView(views: [icon, meter, qrToggle, dots, muteButton, endButton, collapseButton])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 10
         row.setCustomSpacing(12, after: dots)
+        row.setCustomSpacing(6, after: endButton)
         row.edgeInsets = NSEdgeInsets(top: 0, left: Style.pillLeftInset,
                                       bottom: 0, right: Style.pillRightInset)
         row.translatesAutoresizingMaskIntoConstraints = false
+        expandedWidth = row.fittingSize.width.rounded()
+
+        expandButton.translatesAutoresizingMaskIntoConstraints = false
+        expandButton.isHidden = true
+
         pill.addSubview(row)
+        pill.addSubview(expandButton)
         NSLayoutConstraint.activate([
+            // Leading edge and a frozen width, NOT both edges: when the window
+            // shrinks to the tab, the row has to slide out of view untouched.
+            // Pinned to the trailing edge it would compress instead, and the
+            // buttons would visibly squash on their way out.
             row.leadingAnchor.constraint(equalTo: pill.leadingAnchor),
-            row.trailingAnchor.constraint(equalTo: pill.trailingAnchor),
             row.topAnchor.constraint(equalTo: pill.topAnchor),
-            row.bottomAnchor.constraint(equalTo: pill.bottomAnchor),
+            row.widthAnchor.constraint(equalToConstant: expandedWidth),
             row.heightAnchor.constraint(equalToConstant: Style.pillHeight),
+
+            expandButton.centerXAnchor.constraint(equalTo: pill.centerXAnchor),
+            expandButton.centerYAnchor.constraint(equalTo: pill.centerYAnchor),
         ])
         return pill
     }
@@ -636,12 +765,16 @@ final class Bar {
 
     @objc private func toggleMute() { delegate?.barDidToggleMute() }
     @objc private func end() { delegate?.barDidEnd() }
+    @objc private func collapse() { setCollapsed(true, animated: true) }
+    @objc private func expand() { setCollapsed(false, animated: true) }
 
     // MARK: API
 
     func show() {
         guard !isVisible else { return }
         isVisible = true
+        // A new meeting always starts with the bar out in the open.
+        applyCollapsed(false)
         reposition(animated: false)
         let destination = targetFrame()
         panel.alphaValue = 0
@@ -695,6 +828,77 @@ final class Bar {
         qrView.setURL(url)
         qrPill.layoutSubtreeIfNeeded()
         positionQR()
+    }
+
+    /// Folds the bar away against the left edge, or brings it back.
+    ///
+    /// `setLevel`, `setPhones` and `setMuted` keep working while collapsed:
+    /// they only touch views, which stay alive behind the tab and are already
+    /// up to date when it opens again.
+    func setCollapsed(_ collapsed: Bool, animated: Bool) {
+        guard collapsed != isCollapsed else { return }
+        guard animated, isVisible else { return applyCollapsed(collapsed) }
+
+        isCollapsed = collapsed
+        if collapsed {
+            // The QR cannot outlive the pill it points at.
+            isQRPinned = false
+            qrToggle.pinned = false
+            hideQR(animated: true)
+        }
+        // The corner style flips at the start of the motion rather than at the
+        // end: a 16 pt corner squaring off on an element that is already
+        // sliding goes unnoticed, whereas the same change on a tab standing
+        // still reads as a pop.
+        pill.corners = collapsed ? .rightOnly : .all
+
+        let destination = targetFrame()
+        if collapsed {
+            expandButton.isHidden = false
+            expandButton.alphaValue = 0
+        } else {
+            row.isHidden = false
+            row.alphaValue = 0
+        }
+        // One animation group: the window travels and the content cross-fades
+        // on the same clock, so there is no seam between the two.
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = Style.appearDuration
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.allowsImplicitAnimation = true
+            panel.animator().setFrame(destination, display: true)
+            row.animator().alphaValue = collapsed ? 0 : 1
+            expandButton.animator().alphaValue = collapsed ? 1 : 0
+        }, completionHandler: { [self] in
+            guard isCollapsed == collapsed else { return }
+            row.isHidden = collapsed
+            expandButton.isHidden = !collapsed
+            // The shadow is cached from the previous shape; without this the
+            // tab keeps the pill's shadow for a beat.
+            panel.invalidateShadow()
+            if !collapsed { positionQR() }
+        })
+    }
+
+    /// The same change without any animation, used by `show()` and by the
+    /// non-animated path of `setCollapsed`.
+    private func applyCollapsed(_ collapsed: Bool) {
+        isCollapsed = collapsed
+        if collapsed {
+            isQRPinned = false
+            qrToggle.pinned = false
+            hideQR(animated: false)
+        }
+        pill.corners = collapsed ? .rightOnly : .all
+        row.isHidden = collapsed
+        row.alphaValue = collapsed ? 0 : 1
+        expandButton.isHidden = !collapsed
+        expandButton.alphaValue = collapsed ? 1 : 0
+        if isVisible {
+            panel.setFrame(targetFrame(), display: true)
+            panel.invalidateShadow()
+            positionQR()
+        }
     }
 
     // MARK: Level meter
@@ -753,7 +957,8 @@ final class Bar {
     }
 
     private func showQR() {
-        guard isVisible, !qrShown else { return }
+        // Collapsed, there is nothing for the panel to hang off.
+        guard isVisible, !isCollapsed, !qrShown else { return }
         qrShown = true
         qrPill.layoutSubtreeIfNeeded()
         positionQR()
@@ -865,11 +1070,15 @@ final class Bar {
     /// The width comes from `fittingSize`, but it is constant: every element
     /// has a frozen width.
     private func targetFrame() -> NSRect {
-        let screen = NSScreen.main ?? NSScreen.screens[0]
-        let width = pill.fittingSize.width.rounded()
-        return NSRect(x: (screen.visibleFrame.midX - width / 2).rounded(),
-                      y: (screen.visibleFrame.minY + Style.barMargin).rounded(),
-                      width: width,
-                      height: Style.pillHeight)
+        let area = (NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+        let y = (area.minY + Style.barMargin).rounded()
+        // Collapsed: flush against the usable left edge, no margin at all —
+        // the tab is meant to look like it is hanging off the screen.
+        if isCollapsed {
+            return NSRect(x: area.minX.rounded(), y: y,
+                          width: Style.tabWidth, height: Style.pillHeight)
+        }
+        return NSRect(x: (area.midX - expandedWidth / 2).rounded(), y: y,
+                      width: expandedWidth, height: Style.pillHeight)
     }
 }
