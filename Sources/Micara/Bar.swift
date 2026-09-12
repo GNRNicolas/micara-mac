@@ -1084,6 +1084,13 @@ final class Bar {
 
     // MARK: Hover, pinning and QR
 
+    /// Pins the QR panel open (the click on the QR icon, without the click).
+    /// For the screenshots in the README: see `installTestHooks`.
+    func pinQR() {
+        guard !isQRPinned else { return }
+        togglePin()
+    }
+
     private func togglePin() {
         isQRPinned.toggle()
         qrToggle.pinned = isQRPinned
