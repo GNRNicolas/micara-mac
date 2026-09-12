@@ -8,6 +8,11 @@ import AppKit
 /// pure white nor pure black anywhere the eye can see them — `ink` and `night`
 /// are the warm versions, everything else is an alpha of those two.
 enum Style {
+    /// Brand tile and dots, from the logo SVG (#FFFF3F / #2D2F40). Used by the
+    /// logo only; the rest of the bar stays on Eyesaver's ink and night.
+    static let brandYellow = NSColor(calibratedRed: 1.0, green: 1.0, blue: 0.247, alpha: 1)
+    static let brandInk = NSColor(calibratedRed: 0.176, green: 0.184, blue: 0.251, alpha: 1)
+
     /// Accent blue, provisional: Nicolas will supply the logo and its palette.
     /// ONE constant only, so that replacing it is a `git grep accent`.
     /// Calibrated rather than sRGB, like Eyesaver's orange: the value is picked

@@ -29,7 +29,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
     private let muteItem = NSMenuItem(title: "Mute Phones", action: #selector(toggleMute), keyEquivalent: "")
     private let loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleOpenAtLogin), keyEquivalent: "")
     private let micItem = NSMenuItem(title: "Reinstall the Micara Microphone", action: #selector(reinstallMic), keyEquivalent: "")
-    private let codeItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let autoUpdateItem = NSMenuItem(title: "Check for Updates Automatically", action: #selector(toggleAutoUpdate), keyEquivalent: "")
+    private var diagnosticsTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppLog.write("--- launch \(Updater.currentVersion) ---")
@@ -102,17 +103,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
 
         let menu = NSMenu()
         menu.autoenablesItems = false
-        codeItem.isEnabled = false
         menu.addItem(meetingItem)
         menu.addItem(muteItem)
         menu.addItem(.separator())
-        menu.addItem(codeItem)
         menu.addItem(choiceMenu("Mixing", choices: [("Dominance + gate", 0), ("Sum", 1)],
                                 selected: Settings.mixMode == .dominance ? 0 : 1, action: #selector(pickMixMode(_:))))
         menu.addItem(loginItem)
         menu.addItem(micItem)
         menu.addItem(.separator())
         menu.addItem(menuItem("Check for Updates…", #selector(checkForUpdates)))
+        menu.addItem(autoUpdateItem)
         menu.addItem(menuItem("Share Micara", #selector(shareApp)))
         menu.addItem(menuItem("Star on GitHub", #selector(openRepository)))
         menu.addItem(.separator())
@@ -172,8 +172,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
         meetingItem.isEnabled = Account.isRegistered || inMeeting
         muteItem.isEnabled = inMeeting
         muteItem.title = muted ? "Unmute Phones" : "Mute Phones"
-        codeItem.title = Account.code.map { "Space code: \($0)" } ?? "Registering…"
         loginItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        autoUpdateItem.state = Updater.automatic ? .on : .off
         micItem.title = MicaraAggregate.blackHoleInstalled ? "Reinstall the Micara Microphone" : "Install the Micara Microphone…"
     }
 
@@ -231,6 +231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
     }
 
     @objc private func checkForUpdates() { Updater.check(manual: true) }
+    @objc private func toggleAutoUpdate() { Updater.automatic.toggle(); refreshMenuState() }
     @objc private func openRepository() { NSWorkspace.shared.open(Updater.homepage) }
 
     @objc private func shareApp() {
@@ -255,11 +256,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
     private func startMeeting() {
         guard phase == .idle, let token = Account.token, let joinURL = Account.joinURL else { return }
 
-        // 1. The "Micara" microphone (an aggregate around BlackHole) exists and
-        //    becomes the default input. Without BlackHole, nothing can work.
+        // 1. The "Micara" microphone (an aggregate around BlackHole) exists.
+        //    Without BlackHole, nothing can work. The user's real mic is noted
+        //    NOW, before anything changes the default: it is the one the engine
+        //    must capture, never whatever device happens to come first in the
+        //    list (the first test picked a Bluetooth speaker's mic).
+        let realMic = AudioDevices.defaultInputUID()
         do {
             try MicaraAggregate.ensure()
-            try inputSwitcher.activate()
         } catch AudioDeviceError.blackHoleMissing {
             alert("Micara Microphone Missing", "BlackHole is not installed. Menu → \"Install the Micara Microphone…\", then try again.")
             return
@@ -268,13 +272,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
             return
         }
 
-        // 2. Audio engine: the Mac's microphone + the phones → BlackHole.
+        // 2. Micara becomes the default input FIRST. AVAudioEngine stops itself
+        //    on any default-device change (see `AudioEngine.rebuildEngines`),
+        //    so the switch happens before the engines exist rather than under
+        //    them. The real mic was noted above and is passed explicitly.
+        do { try inputSwitcher.activate() } catch {
+            alert("Micara Microphone", "Could not select the Micara microphone: \(error)")
+            return
+        }
+
+        // 3. Audio engine: the Mac's microphone + the phones → BlackHole.
         let engine = AudioEngine()
         engine.mode = Settings.mixMode
         engine.phonesMuted = muted
         engine.onLevel = { [weak self] level in self?.bar.setLevel(level) }
         do {
-            try engine.start(outputDeviceUID: MicaraAggregate.blackHoleUID)
+            try engine.start(outputDeviceUID: MicaraAggregate.blackHoleUID, inputDeviceUID: realMic)
         } catch {
             inputSwitcher.restore()
             alert("Audio", "Could not start the audio engine: \(error)")
@@ -282,14 +295,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
         }
         audio = engine
 
-        // 3. Signal: phones join through the code in the QR.
+        // 4. Signal: phones join through the code in the QR.
         let client = SignalClient(config: SignalConfig(serverURL: Account.serverURL, token: token), audio: engine)
         client.onPhones = { [weak self] dots in self?.bar.setPhones(dots) }
         client.onState = { [weak self] state in self?.signalDidChange(state) }
         client.connect()
         signal = client
 
-        // 4. What is visible.
+        // 5. What is visible.
         phase = .meeting
         Settings.meetingsStarted += 1
         bar.setJoinURL(joinURL)
@@ -298,6 +311,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
         borders.show()
         bar.show()
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in Account.heartbeat(state: "active") }
+        // What is actually flowing, for the log: buffers received and peak per
+        // channel, blocks rendered. Tells "nothing arrives" from "arrives muted".
+        diagnosticsTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            guard let self, let audio = self.audio else { return }
+            let channels = audio.diagnostics().sorted { $0.key < $1.key }
+                .map { "\($0.key): \($0.value.buffers) buf, peak \(String(format: "%.3f", $0.value.peak))" }
+                .joined(separator: " | ")
+            AppLog.write("[audio] rendered \(audio.renderedBlocks) blocks | \(channels)")
+        }
         Account.heartbeat(state: "active")
         refreshMenuState()
         AppLog.write("meeting started")
@@ -307,6 +329,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
         guard phase == .meeting else { return }
         phase = .idle
         heartbeatTimer?.invalidate(); heartbeatTimer = nil
+        diagnosticsTimer?.invalidate(); diagnosticsTimer = nil
         signal?.disconnect(); signal = nil
         audio?.stop(); audio = nil
         bar.hide()

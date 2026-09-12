@@ -556,6 +556,12 @@ final class AudioEngine {
 
     private var outputEngine: AVAudioEngine?
     private var inputEngine: AVAudioEngine?
+    /// What `start` was asked for, so a configuration change can rebuild the
+    /// same graph.
+    private var requestedOutputUID: String?
+    private var requestedInputUID: String?
+    private var configurationObservers: [NSObjectProtocol] = []
+    private var pendingRebuild: DispatchWorkItem?
     private var sourceNode: AVAudioSourceNode?
     private var tickTimer: DispatchSourceTimer?
     private var inputConverter: AVAudioConverter?
@@ -589,6 +595,8 @@ final class AudioEngine {
     func start(outputDeviceUID: String, inputDeviceUID: String? = nil) throws {
         try queue.sync {
             guard !isRunning else { return }
+            requestedOutputUID = outputDeviceUID
+            requestedInputUID = inputDeviceUID
             // INPUT FIRST: bringing the input engine up reconfigures the I/O
             // unit and brings down an output engine that already started
             // (measured at the spike: the output rendered ~36 blocks then went
@@ -597,8 +605,13 @@ final class AudioEngine {
             do { try startInput(uid: inputDeviceUID) } catch {
                 inputEngine = nil
                 inputDeviceName = nil
+                AppLog.write("[audio] Mac mic NOT captured: \(error)")
+            }
+            if let name = inputDeviceName {
+                AppLog.write("[audio] Mac mic: \(name), echo cancellation \(inputEchoCancelled ? "on" : "off")")
             }
             try startOutput(uid: outputDeviceUID)
+            AppLog.write("[audio] output: \(AudioDevices.find(uid: outputDeviceUID)?.name ?? outputDeviceUID)")
             startTick()
             isRunning = true
         }
@@ -609,6 +622,10 @@ final class AudioEngine {
             guard isRunning || outputEngine != nil || inputEngine != nil else { return }
             tickTimer?.cancel()
             tickTimer = nil
+            pendingRebuild?.cancel()
+            pendingRebuild = nil
+            configurationObservers.forEach(NotificationCenter.default.removeObserver)
+            configurationObservers.removeAll()
 
             inputEngine?.inputNode.removeTap(onBus: 0)
             inputEngine?.stop()
@@ -722,9 +739,63 @@ final class AudioEngine {
         engine.connect(node, to: engine.outputNode, format: format)
         engine.prepare()
         try engine.start()
+        observeConfigurationChanges(of: engine)
 
         outputEngine = engine
         sourceNode = node
+    }
+
+    // MARK: - Configuration changes
+
+    /// AVAudioEngine STOPS ITSELF whenever the system's default device changes,
+    /// even with the I/O unit pinned to another device, and only posts a
+    /// notification. Measured in the real app (12/09): the output rendered 4
+    /// blocks, then nothing, the moment Micara became the default input. The
+    /// graph is rebuilt on the same devices; phone channels are kept, only the
+    /// engines and the local channel are recreated. Both engines post, so the
+    /// rebuild is coalesced.
+    private func observeConfigurationChanges(of engine: AVAudioEngine) {
+        let token = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { [weak self] _ in self?.scheduleRebuild() }
+        configurationObservers.append(token)
+    }
+
+    private func scheduleRebuild() {
+        queue.async { [self] in
+            guard isRunning else { return }
+            pendingRebuild?.cancel()
+            let work = DispatchWorkItem { [self] in self.rebuildEngines() }
+            pendingRebuild = work
+            queue.asyncAfter(deadline: .now() + 0.3, execute: work)
+        }
+    }
+
+    /// On `queue`. The notification also fires while both engines keep running
+    /// (measured: 50 in 15 s once the pinned mic differs from the default
+    /// input), so only a graph that actually stopped is rebuilt — rebuilding a
+    /// live one recreates the channels, which posts again, which loops.
+    private func rebuildEngines() {
+        guard isRunning, let outputUID = requestedOutputUID else { return }
+        let outputDead = outputEngine.map { !$0.isRunning } ?? true
+        let inputDead = inputEngine.map { !$0.isRunning } ?? false
+        guard outputDead || inputDead else { return }
+        AppLog.write("[audio] configuration changed, rebuilding the graph (output \(outputDead ? "stopped" : "running"), mic \(inputDead ? "stopped" : "running"))")
+        configurationObservers.forEach(NotificationCenter.default.removeObserver)
+        configurationObservers.removeAll()
+        inputEngine?.inputNode.removeTap(onBus: 0)
+        inputEngine?.stop()
+        inputEngine = nil
+        outputEngine?.stop()
+        if let node = sourceNode, let engine = outputEngine { engine.detach(node) }
+        sourceNode = nil
+        outputEngine = nil
+        do { try startInput(uid: requestedInputUID) } catch {
+            AppLog.write("[audio] rebuild: Mac mic NOT captured: \(error)")
+        }
+        do { try startOutput(uid: outputUID) } catch {
+            AppLog.write("[audio] rebuild: output failed: \(error)")
+        }
     }
 
     // MARK: - The Mac's mic
@@ -745,7 +816,14 @@ final class AudioEngine {
         // when the default is the right mic, capture without AEC otherwise.
         // Never invert that priority — capturing BlackHole by mistake loops the
         // mix onto itself.
-        let canUseAEC = AudioDevices.defaultInputUID() == device.uid
+        // Measured in the real app (12/09): with the VPIO on, the output engine
+        // rendered 4 blocks and went silent for good the moment Micara became
+        // the default input, and the mic tap died with it. The VPIO tracks the
+        // default device and takes the shared I/O down with it. Echo
+        // cancellation is therefore OFF; Teams/Zoom run their own AEC on the
+        // Micara input anyway. Flip `aecAllowed` to try again after a change.
+        let aecAllowed = false
+        let canUseAEC = aecAllowed && AudioDevices.defaultInputUID() == device.uid
         var engine: AVAudioEngine
         do {
             engine = try makeInputEngine(device: device, voiceProcessing: canUseAEC, channel: channel)
@@ -812,6 +890,7 @@ final class AudioEngine {
         }
         engine.prepare()
         try engine.start()
+        observeConfigurationChanges(of: engine)
         return engine
     }
 

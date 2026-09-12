@@ -13,6 +13,12 @@ enum Updater {
     private static let endpoint = URL(string: "https://api.github.com/repos/\(repository)/releases/latest")!
     private static let checkInterval: TimeInterval = 24 * 60 * 60
 
+    /// Menu toggle. Off means the app never talks to GitHub on its own.
+    static var automatic: Bool {
+        get { UserDefaults.standard.object(forKey: "autoUpdate") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "autoUpdate") }
+    }
+
     private static var lastCheck: Date? {
         get { UserDefaults.standard.object(forKey: "lastUpdateCheck") as? Date }
         set { UserDefaults.standard.set(newValue, forKey: "lastUpdateCheck") }
@@ -25,7 +31,10 @@ enum Updater {
     /// `manual`: triggered from the menu, so it also reports "up to date" and
     /// ignores the once-a-day limit.
     static func check(manual: Bool) {
-        if !manual, let last = lastCheck, Date().timeIntervalSince(last) < checkInterval { return }
+        if !manual {
+            guard automatic else { return }
+            if let last = lastCheck, Date().timeIntervalSince(last) < checkInterval { return }
+        }
         lastCheck = Date()
 
         var request = URLRequest(url: endpoint)

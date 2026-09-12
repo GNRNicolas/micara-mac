@@ -604,11 +604,32 @@ final class Bar {
         panel.appearance = NSAppearance(named: .vibrantDark)
     }
 
+    /// The Micara logo (the dot grid on its yellow tile), drawn rather than
+    /// loaded: no asset to ship, crisp at any scale. Muted dims it.
     private func applyMicSymbol() {
-        icon.image = NSImage(systemSymbolName: muted ? "mic.slash.fill" : "mic.fill",
-                             accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 15, weight: .regular))
-        icon.contentTintColor = Style.ink.withAlphaComponent(muted ? 0.4 : 0.75)
+        icon.image = Bar.logoImage(side: Style.iconBox)
+        icon.alphaValue = muted ? 0.4 : 1
+    }
+
+    static func logoImage(side: CGFloat) -> NSImage {
+        NSImage(size: NSSize(width: side, height: side), flipped: true) { rect in
+            // Coordinates from the brand SVG (viewBox 64).
+            let dots: [(CGFloat, CGFloat)] = [
+                (22.29, 17.60), (41.08, 17.60), (31.69, 26.99), (13.52, 36.38), (13.52, 46.40),
+                (13.52, 26.99), (22.29, 26.99), (41.08, 26.99), (50.48, 26.99), (50.48, 36.38),
+                (50.48, 46.40), (31.69, 37.01),
+            ]
+            let scale = rect.width / 64
+            Style.brandYellow.setFill()
+            NSBezierPath(roundedRect: rect.insetBy(dx: 2 * scale, dy: 2 * scale),
+                         xRadius: 14 * scale, yRadius: 14 * scale).fill()
+            Style.brandInk.setFill()
+            let r = 3.44 * scale
+            for (x, y) in dots {
+                NSBezierPath(ovalIn: NSRect(x: x * scale - r, y: y * scale - r, width: 2 * r, height: 2 * r)).fill()
+            }
+            return true
+        }
     }
 
     // MARK: Actions
