@@ -101,6 +101,17 @@ enum Style {
     /// Gap between the top of the pill and the bottom of the QR panel.
     static let qrGap: CGFloat = 10
 
+    // MARK: Downloadable card
+
+    /// Side of the QR block on the exported card, in the template's own PIXELS
+    /// (the template is 1800x1800), centred. Not points: the card is rendered
+    /// 1:1 into a bitmap, never through a 2x backing scale.
+    static let cardQRSide: CGFloat = 400
+    /// Quiet zone, in modules, kept INSIDE `cardQRSide`. Four is the spec's
+    /// minimum; without it a scanner has no edge to lock onto, whatever the
+    /// card's background looks like.
+    static let cardQuietModules = 0
+
     // MARK: Animations
 
     /// Durations and curve shared by every transition, taken from Eyesaver:
