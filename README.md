@@ -4,6 +4,16 @@
 
 <h1 align="center">Micara</h1>
 
+## Install
+
+The command bellow builds the app, puts it in `/Applications` and starts it.
+Needs macOS 13+ and the Xcode command line tools (`xcode-select --install`).
+Your password is asked once, to install **BlackHole**, the virtual microphone
+Micara writes into: a system driver, and no app can put one in place without
+it.
+
+No window, no Dock icon. Look for the Micara logo in the menu bar.
+
 ```sh
 git clone https://github.com/GNRNicolas/micara-mac.git && cd micara-mac && ./build.sh --install
 ```
@@ -15,15 +25,6 @@ through.
 
 ![A Meet call with the Micara bar at the bottom and the QR panel open above it](docs/meeting.webp)
 
-## Install
-
-The command above builds the app, puts it in `/Applications` and starts it.
-Needs macOS 13+ and the Xcode command line tools (`xcode-select --install`).
-Your password is asked once, to install **BlackHole**, the virtual microphone
-Micara writes into: a system driver, and no app can put one in place without
-it.
-
-No window, no Dock icon. Look for the Micara logo in the menu bar.
 
 ## Use
 
