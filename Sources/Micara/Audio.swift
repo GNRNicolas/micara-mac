@@ -98,88 +98,9 @@ private let tickSec: Double = 0.05
 
 // MARK: - Per-channel ring buffer
 
-/// Circular mono Float32 queue, one producer (the WebRTC thread or the mic tap)
-/// and one consumer (the CoreAudio thread).
-///
-/// WHY an `os_unfair_lock` rather than lock-free: the critical section is a
-/// `memcpy` of a few hundred floats, never an allocation nor a system call. It
-/// is the honest option — a hand-written lock-free queue without Swift 5.9
-/// atomics would have been wrong more often than it was slow.
-private final class Ring {
-    private let capacity: Int
-    private let storage: UnsafeMutablePointer<Float>
-    private var writeIndex = 0
-    private var filled = 0
-    private var lock = os_unfair_lock_s()
-    /// Peak written since the last read — diagnostics only (the log must be
-    /// able to say "packets are arriving but they are silent", a failure a
-    /// buffer counter cannot tell apart from a healthy stream).
-    private var peakSinceRead: Float = 0
-
-    init(capacity: Int) {
-        self.capacity = capacity
-        storage = .allocate(capacity: capacity)
-        storage.initialize(repeating: 0, count: capacity)
-    }
-
-    deinit {
-        storage.deinitialize(count: capacity)
-        storage.deallocate()
-    }
-
-    func write(_ source: UnsafePointer<Float>, count: Int) {
-        guard count > 0 else { return }
-        // A buffer larger than the ring cannot happen (10 ms of WebRTC against
-        // 500 ms of ring), but we read only its tail rather than overflow.
-        let n = min(count, capacity)
-        let src = source + (count - n)
-        os_unfair_lock_lock(&lock)
-        defer { os_unfair_lock_unlock(&lock) }
-        for i in 0..<n { peakSinceRead = max(peakSinceRead, abs(src[i])) }
-        let firstChunk = min(n, capacity - writeIndex)
-        storage.advanced(by: writeIndex).update(from: src, count: firstChunk)
-        if firstChunk < n {
-            storage.update(from: src + firstChunk, count: n - firstChunk)
-        }
-        writeIndex = (writeIndex + n) % capacity
-        filled = min(filled + n, capacity)
-    }
-
-    /// Reads `count` samples; pads with zeros if the producer is behind
-    /// (underrun = silence, never noise or stale sound).
-    func read(into destination: UnsafeMutablePointer<Float>, count: Int, dropOlderThan maxFrames: Int) {
-        os_unfair_lock_lock(&lock)
-        // Drift pruning: we throw away the OLDEST, never the newest — the lag
-        // must be caught up forwards, not by replaying the past.
-        if filled > maxFrames { filled = maxFrames }
-        let available = min(filled, count)
-        let missing = count - available
-        if missing > 0 { destination.update(repeating: 0, count: missing) }
-        if available > 0 {
-            let start = ((writeIndex - available) % capacity + capacity) % capacity
-            let firstChunk = min(available, capacity - start)
-            (destination + missing).update(from: storage + start, count: firstChunk)
-            if firstChunk < available {
-                (destination + missing + firstChunk).update(from: storage, count: available - firstChunk)
-            }
-            filled -= available
-        }
-        os_unfair_lock_unlock(&lock)
-    }
-
-    func clear() {
-        os_unfair_lock_lock(&lock)
-        filled = 0
-        os_unfair_lock_unlock(&lock)
-    }
-
-    /// Peak written since the last call, then reset to zero.
-    func drainPeak() -> Float {
-        os_unfair_lock_lock(&lock)
-        defer { peakSinceRead = 0; os_unfair_lock_unlock(&lock) }
-        return peakSinceRead
-    }
-}
+/// `MonoRing` (MicaraCore, tested): one producer (the WebRTC thread or the mic
+/// tap), one consumer (the CoreAudio thread), FIFO order guaranteed.
+private typealias Ring = MonoRing
 
 // MARK: - Channel
 
@@ -550,6 +471,14 @@ final class AudioEngine {
     /// Serial queue that owns the channel table and the tick. The audio thread
     /// never touches it: it reads a snapshot published by `Mixdown`.
     private let queue = DispatchQueue(label: "com.getmicara.audio.control")
+    /// Marks `queue` so `onQueue` can tell whether it is already running on
+    /// it. WHY: `deinit` calls `stop()`, and the last reference to the engine
+    /// can be released FROM the queue itself (a `queue.async { [self] … }`
+    /// block being disposed after the meeting ended). A `queue.sync` from
+    /// there is a deadlock, which libdispatch turns into a crash — measured
+    /// live (12/09): "dispatch_sync called on queue already owned by current
+    /// thread", at the end of every meeting once a phone had joined.
+    private static let queueKey = DispatchSpecificKey<Void>()
     private var channels: [String: Channel] = [:]
     private var renderers: [String: TrackRenderer] = [:]
     private var tracks: [String: LKRTCAudioTrack] = [:]
@@ -583,6 +512,13 @@ final class AudioEngine {
         self.config = config
         mixer = DominanceMixer(config: config)
         mixdown = Mixdown(config: config)
+        queue.setSpecific(key: Self.queueKey, value: ())
+    }
+
+    /// Runs `body` on `queue`, inline when already there (see `queueKey`).
+    private func onQueue<T>(_ body: () throws -> T) rethrows -> T {
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil { return try body() }
+        return try queue.sync(execute: body)
     }
 
     deinit { stop() }
@@ -593,7 +529,7 @@ final class AudioEngine {
     /// the given UID. `inputDeviceUID` is for tests; in production it is left
     /// `nil` and the engine picks (see `resolveInputDevice`).
     func start(outputDeviceUID: String, inputDeviceUID: String? = nil) throws {
-        try queue.sync {
+        try onQueue {
             guard !isRunning else { return }
             requestedOutputUID = outputDeviceUID
             requestedInputUID = inputDeviceUID
@@ -618,7 +554,7 @@ final class AudioEngine {
     }
 
     func stop() {
-        queue.sync {
+        onQueue {
             guard isRunning || outputEngine != nil || inputEngine != nil else { return }
             tickTimer?.cancel()
             tickTimer = nil
@@ -695,7 +631,7 @@ final class AudioEngine {
     var renderedBlocks: Int { mixdown.renderCount }
 
     func diagnostics() -> [String: (buffers: Int, peak: Float)] {
-        queue.sync {
+        onQueue {
             var out: [String: (buffers: Int, peak: Float)] = [:]
             for (id, channel) in channels {
                 out[id] = (renderers[id]?.bufferCount ?? 0, channel.ring.drainPeak())
@@ -956,16 +892,21 @@ final class AudioEngine {
     /// that climbs to the limiter within seconds.
     private func resolveInputDevice(uid: String?) throws -> AudioDeviceInfo? {
         let devices = AudioDevices.all().filter { $0.inputChannels > 0 }
-        if let uid {
-            guard let forced = devices.first(where: { $0.uid == uid }) else {
-                throw AudioEngineError.deviceNotFound(uid)
-            }
-            return forced
-        }
         let forbidden: (AudioDeviceInfo) -> Bool = { device in
             device.uid == MicaraAggregate.uid
                 || device.isAggregate
                 || device.name.lowercased().contains("blackhole")
+        }
+        if let uid {
+            guard let forced = devices.first(where: { $0.uid == uid }) else {
+                throw AudioEngineError.deviceNotFound(uid)
+            }
+            // Even a caller's explicit choice is checked: after a crash
+            // mid-meeting the system default is still Micara, and the caller
+            // may hand it over in good faith. Measured live (12/09): "Mac mic:
+            // Micara" — the mix captured itself.
+            if !forbidden(forced) { return forced }
+            AppLog.write("[audio] requested mic \(forced.name) is Micara/BlackHole itself, picking another one")
         }
         if let current = AudioDevices.defaultInputUID(),
            let device = devices.first(where: { $0.uid == current }),

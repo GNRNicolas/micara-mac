@@ -408,6 +408,13 @@ final class DefaultInputSwitcher {
         self.defaults = defaults
     }
 
+    /// The microphone remembered by `activate()`, if a `restore()` has not
+    /// happened since. Non-nil at launch = the previous run died mid-meeting.
+    var remembered: String? {
+        guard let uid = defaults.string(forKey: Self.key), uid != MicaraAggregate.uid else { return nil }
+        return uid
+    }
+
     /// Remembers the current microphone, then forces "Micara".
     /// WHY the "unless it is already Micara" guard: a double `activate()` (a
     /// meeting restarted without `restore()`, or a recovery after a crash)

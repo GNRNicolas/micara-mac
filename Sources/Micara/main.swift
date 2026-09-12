@@ -39,6 +39,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
         installTestHooks()
         register()
 
+        // Crash recovery: the previous run died mid-meeting and left Micara as
+        // the default microphone. Give the user their mic back right away —
+        // nothing writes into Micara while no meeting is running, so every
+        // app would be capturing silence.
+        if AudioDevices.defaultInputUID() == MicaraAggregate.uid, inputSwitcher.remembered != nil {
+            inputSwitcher.restore()
+            AppLog.write("default microphone restored after an unclean exit")
+        }
+
         // Open at Login on by default on first install: the app is meant to be
         // forgotten in the menu bar. Switchable from the menu.
         if !UserDefaults.standard.bool(forKey: "loginItemOffered") {
@@ -261,7 +270,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
         //    NOW, before anything changes the default: it is the one the engine
         //    must capture, never whatever device happens to come first in the
         //    list (the first test picked a Bluetooth speaker's mic).
-        let realMic = AudioDevices.defaultInputUID()
+        //    If the default is ALREADY Micara (the previous run died mid-meeting
+        //    and never restored it), the remembered mic is used instead —
+        //    capturing Micara would feed the mix back into itself.
+        var realMic = AudioDevices.defaultInputUID()
+        if realMic == MicaraAggregate.uid { realMic = inputSwitcher.remembered }
         do {
             try MicaraAggregate.ensure()
         } catch AudioDeviceError.blackHoleMissing {
