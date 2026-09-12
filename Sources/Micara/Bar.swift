@@ -705,7 +705,7 @@ final class Bar {
         let caption = NSTextField(labelWithString: "Scan to join")
         caption.font = .systemFont(ofSize: 11, weight: .medium)
         caption.textColor = Style.ink.withAlphaComponent(0.6)
-        caption.alignment = .center
+        caption.alignment = .left
 
         for sub in [qrView, caption, downloadButton] as [NSView] {
             sub.translatesAutoresizingMaskIntoConstraints = false
@@ -717,16 +717,14 @@ final class Bar {
             qrView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Style.qrPadding),
             qrView.heightAnchor.constraint(equalTo: qrView.widthAnchor),
 
+            // One footer row under the QR: caption on the left, download on
+            // the right, both aligned on the QR's own edges.
             caption.topAnchor.constraint(equalTo: qrView.bottomAnchor, constant: 10),
-            caption.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            caption.leadingAnchor.constraint(equalTo: qrView.leadingAnchor),
             caption.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -14),
-
-            // Tucked into the top padding band rather than floated over the
-            // corner: anchoring its bottom to the QR's top is what guarantees
-            // it can never nibble a finder pattern, whatever the padding
-            // becomes later. It adds no constraint that could widen the panel.
-            downloadButton.bottomAnchor.constraint(equalTo: qrView.topAnchor),
+            downloadButton.centerYAnchor.constraint(equalTo: caption.centerYAnchor),
             downloadButton.trailingAnchor.constraint(equalTo: qrView.trailingAnchor),
+            downloadButton.leadingAnchor.constraint(greaterThanOrEqualTo: caption.trailingAnchor, constant: 8),
         ])
         return view
     }
