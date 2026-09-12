@@ -128,7 +128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
     /// wallpaper). A fixed grey PNG stayed grey everywhere, unreadable on a
     /// light bar.
     private func statusImage() -> NSImage {
-        let side: CGFloat = 18
+        let side: CGFloat = 22
         let image = NSImage(size: NSSize(width: side, height: side), flipped: true) { rect in
             // Coordinates from logo.svg (viewBox 64), radius 3.44.
             let dots: [(CGFloat, CGFloat)] = [
@@ -137,7 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
                 (50.48, 46.40), (31.69, 37.01),
             ]
             let scale = rect.width / 64
-            let r = 3.44 * scale * 1.15  // a touch bolder: 18 pt, not 64
+            let r = 3.44 * scale * 1.1  // slightly bolder than the SVG: 22 pt, not 64
             NSColor.black.setFill()
             for (x, y) in dots {
                 NSBezierPath(ovalIn: NSRect(x: x * scale - r, y: y * scale - r, width: 2 * r, height: 2 * r)).fill()

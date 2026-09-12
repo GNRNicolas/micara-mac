@@ -61,7 +61,7 @@ if [ ! -f "Resources/$NAME.icns" ]; then
   done
   iconutil -c icns -o "Resources/$NAME.icns" "build/$NAME.iconset"
 fi
-cp "Resources/$NAME.icns" \
+cp "Resources/$NAME.icns" Resources/qr-card.png \
    "$BLACKHOLE_PKG" Resources/GPL-3.0.txt "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
