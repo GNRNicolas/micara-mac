@@ -104,7 +104,7 @@ if [ "${1:-}" = "--install" ]; then
   defaults write "$ID" sourcePath -string "$(pwd)"
   open "/Applications/$NAME.app"
   echo "→ installed in /Applications and started"
-  echo "  No window, no Dock icon: look for the microphone in the menu bar, top"
+  echo "  No window, no Dock icon: look for the Micara logo in the menu bar, top"
   echo "  right, near the clock."
 else
   echo "→ $(pwd)/$APP"

@@ -22,13 +22,15 @@ writes into. A virtual microphone is a system driver, and no app can put one in
 place without it.
 
 Micara then opens when the Mac starts, with no window and no Dock icon. Look
-for the microphone in the menu bar, near the clock.
+for the Micara logo in the menu bar, near the clock.
 
 ## Use
 
-1. In Teams, Zoom or Meet, pick the **Micara** microphone. Micara also sets it
-   as the Mac's default microphone for the duration of the meeting, and puts
-   the previous one back at the end.
+1. In Teams, Zoom or Meet, pick the **Micara** microphone (Chrome lists it as
+   "Micara (Aggregate)"). Micara also sets it as the Mac's default microphone
+   for the duration of the meeting, and puts the previous one back at the end.
+   The microphone carries sound only while a meeting is running: outside one,
+   a mic test in Meet shows nothing, which is expected.
 2. Micara menu → **Start a Meeting**. The blue border appears, the bar slides
    up.
 3. Hover the QR icon in the bar: the QR code unfolds (click it to keep it open). Each participant scans it with their
