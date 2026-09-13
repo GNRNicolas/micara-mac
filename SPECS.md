@@ -118,6 +118,33 @@ Colours: a blue border and accent (the value to be settled with the logo),
 Eyesaver's ink/night for everything else. The whole style inherits Eyesaver's
 `PillBackground`, `PillButton` and `Borders`.
 
+## The bar is rebuilt for every meeting
+
+Two ways a window stops appearing with nothing in the log, both met on
+13/09 (Micara for the first, Eyesaver for the second):
+
+1. **Race between the exit fade and the next show.** `hide()` clears the flag,
+   fades, and `orderOut`s in its completion. A `show()` inside those 0.16 s runs
+   first; the stale completion then orders out a wanted window. Flag says
+   visible, window is gone — for the whole meeting. Measured from outside the
+   process with `CGWindowListCopyWindowInfo`: bar 443x60, alpha 1, onscreen no.
+   Fix: the completion revalidates (`guard !isVisible`), and `show()` checks
+   `panel.isVisible`, not only the flag.
+2. **A panel reused for hours** across Spaces and full-screen apps that the
+   window server stops compositing: alpha 1, onscreen no, nothing in the app
+   asked for it. `NSWindow.isVisible` still says true — that gap *is* the bug.
+
+Hence: `AppDelegate` creates a new `Bar` for every meeting (the old one lives
+on in its own fade completion and cannot touch the new panel), and 0.8 s after
+`show()` it asks the window server whether the bar is on screen
+(`Bar.isComposited`, own windows only, no Screen Recording permission). If not,
+it rebuilds it **once** per meeting: a second check would measure a window
+still fading in and loop. Stress: 15 start/end cycles with gaps from 50 ms to
+2 s, bar composited every time, no rebuild needed.
+
+Diagnose without restarting the app (a restart erases the proof): a tiny
+Swift binary listing the app's windows with bounds, alpha and isOnscreen.
+
 ## Out of scope (for now)
 
 A redesign of the phone PWA, the fate of the web dashboard, Intel, a Developer

@@ -762,6 +762,22 @@ final class Bar {
                                     .fullScreenAuxiliary, .ignoresCycle]
         // Always dark, whatever the system theme.
         panel.appearance = NSAppearance(named: .vibrantDark)
+        // ARC owns the panel: it dies with its Bar, never through close().
+        panel.isReleasedWhenClosed = false
+    }
+
+    /// Whether the window server is actually compositing the bar — judged
+    /// from OUTSIDE the process. `NSWindow.isVisible` answers true for a
+    /// window the compositor has dropped (a panel reused for hours across
+    /// Spaces and full-screen apps ends up there: alpha 1, not on screen —
+    /// Eyesaver, 13/09), and that gap is precisely the bug. Only the app's
+    /// own windows are readable without the Screen Recording permission,
+    /// which is all this needs.
+    var isComposited: Bool {
+        guard isVisible else { return false }
+        let number = UInt32(panel.windowNumber)
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+        return list.contains { ($0[kCGWindowNumber as String] as? UInt32) == number }
     }
 
     /// The Micara logo (the dot grid on its yellow tile), drawn rather than
