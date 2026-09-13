@@ -23,14 +23,22 @@ git add build.sh
 git commit -q -m "release(mac): $VERSION"
 echo "→ build.sh at $VERSION, committed"
 
-# 2. Mirror: the history of bridge-swift/ alone, pushed as the public main.
-#    Edits made directly on GitHub (README from the web editor) are pulled in
-#    first, otherwise the push is rejected as non-fast-forward.
+# 2. Mirror: the history of bridge-swift/ alone becomes the public main.
+#    The split never descends from commits made directly on GitHub (README
+#    from the web editor), so it is published as a MERGE: parents = current
+#    mirror main + split, tree = the split's. Always fast-forward, nothing
+#    rewritten. Bring GitHub edits back into the monorepo beforehand with
+#    `git merge -s subtree -Xsubtree=bridge-swift --allow-unrelated-histories <mirror/main>`.
 ROOT="$(git rev-parse --show-toplevel)"
-git -C "$ROOT" subtree pull --prefix="$PREFIX" "$PUBLIC_REMOTE" main -q -m "merge(mac): edits made on the public mirror" 2>/dev/null || true
+git -C "$ROOT" fetch -q "$PUBLIC_REMOTE" main:refs/remotes/mirror/main
 SPLIT="$(git -C "$ROOT" subtree split --prefix="$PREFIX" 2>/dev/null)"
-git -C "$ROOT" push -q "$PUBLIC_REMOTE" "$SPLIT:main"
-echo "→ mirrored into $PUBLIC_REPO"
+if git -C "$ROOT" diff --quiet "refs/remotes/mirror/main" "$SPLIT"; then
+  echo "→ mirror already has this tree"
+else
+  MERGE="$(git -C "$ROOT" commit-tree "$SPLIT^{tree}" -p refs/remotes/mirror/main -p "$SPLIT" -m "release(mac): $VERSION")"
+  git -C "$ROOT" push -q "$PUBLIC_REMOTE" "$MERGE:main"
+  echo "→ mirrored into $PUBLIC_REPO"
+fi
 
 # 3. The release the app looks for (tag_name vX.Y.Z, compared to VERSION).
 gh auth switch -u GNRNicolas >/dev/null 2>&1 || true
