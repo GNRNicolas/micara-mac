@@ -924,7 +924,12 @@ final class Bar {
     // MARK: API
 
     func show() {
-        guard !isVisible else { return }
+        // The flag alone is not trusted: if a hide() completion fired after a
+        // show() (see `hide`), the panel is off screen with `isVisible` true,
+        // and a flag-only guard would keep it off for the whole meeting.
+        // Measured on 13/09 with `CGWindowListCopyWindowInfo`: bar 443x60,
+        // alpha 1, onscreen no, after End then Start 50 ms apart.
+        guard !isVisible || !panel.isVisible else { return }
         isVisible = true
         // A new meeting always starts with the bar out in the open.
         applyCollapsed(false)
@@ -953,7 +958,13 @@ final class Bar {
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = Style.disappearDuration
             panel.animator().alphaValue = 0
-        }, completionHandler: { [self] in panel.orderOut(nil) })
+        }, completionHandler: { [self] in
+            // This block runs in a future where its decision may be stale: a
+            // show() may have happened during the fade. Revalidate, do not
+            // apply.
+            guard !isVisible else { return }
+            panel.orderOut(nil)
+        })
     }
 
     /// Mix level, 0…1, received ~20 times a second. Only the target moves here:
@@ -1119,7 +1130,8 @@ final class Bar {
 
     private func showQR() {
         // Collapsed, there is nothing for the panel to hang off.
-        guard isVisible, !isCollapsed, !qrShown else { return }
+        // Same belt as `show()`: the flag is not enough if the panel is gone.
+        guard isVisible, !isCollapsed, !(qrShown && qrPanel.isVisible) else { return }
         qrShown = true
         qrPill.layoutSubtreeIfNeeded()
         positionQR()
