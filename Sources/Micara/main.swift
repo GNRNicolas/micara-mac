@@ -13,7 +13,15 @@ import MicaraCore
 final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
     private var statusItem: NSStatusItem!
     private let borders = Borders()
+    /// Rebuilt for EVERY meeting (see `startMeeting`): a panel reused for
+    /// hours across Spaces and full-screen apps can end up no longer
+    /// composited by the window server, with nothing in the app to say so.
     private lazy var bar = Bar(delegate: self)
+    /// One rebuild per meeting at most: rebuilding replays the entrance fade,
+    /// and a check that measures a window still fading in would loop.
+    private var barRebuiltThisMeeting = false
+    /// Last roster from the signal client, so a rebuilt bar shows the dots.
+    private var phones: [PhoneDot] = []
     private let inputSwitcher = DefaultInputSwitcher()
     private var audio: AudioEngine?
     private var signal: SignalClient?
@@ -355,19 +363,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
 
         // 4. Signal: phones join through the code in the QR.
         let client = SignalClient(config: SignalConfig(serverURL: Account.serverURL, token: token), audio: engine)
-        client.onPhones = { [weak self] dots in self?.bar.setPhones(dots) }
+        client.onPhones = { [weak self] dots in
+            self?.phones = dots
+            self?.bar.setPhones(dots)
+        }
         client.onState = { [weak self] state in self?.signalDidChange(state) }
         client.connect()
         signal = client
 
-        // 5. What is visible.
+        // 5. What is visible. The bar is a fresh panel every time: the
+        //    previous one is still fading out (its Bar lives on in its own
+        //    completion block), and nothing it does can reach this one.
         phase = .meeting
         Settings.meetingsStarted += 1
-        bar.setJoinURL(joinURL)
-        bar.setMuted(muted)
-        bar.setPhones([])
+        bar = Bar(delegate: self)
+        barRebuiltThisMeeting = false
+        phones = []
+        presentBar(joinURL: joinURL)
         borders.show()
-        bar.show()
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in Account.heartbeat(state: "active") }
         // What is actually flowing, for the log: buffers received and peak per
         // channel, blocks rendered. Tells "nothing arrives" from "arrives muted".
@@ -381,6 +394,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, BarDelegate {
         Account.heartbeat(state: "active")
         refreshMenuState()
         AppLog.write("meeting started")
+    }
+
+    /// Shows the bar, then checks ONCE, from outside the process, that the
+    /// window server is compositing it; if not, rebuilds it once. 0.8 s: past
+    /// the 0.22 s entrance fade, otherwise a window still fading in counts as
+    /// a failure.
+    private func presentBar(joinURL: URL) {
+        bar.setJoinURL(joinURL)
+        bar.setMuted(muted)
+        bar.setPhones(phones)
+        bar.show()
+        let presented = bar
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self, phase == .meeting, bar === presented, !bar.isComposited else { return }
+            guard !barRebuiltThisMeeting else {
+                AppLog.write("bar: still not on screen after a rebuild, giving up for this meeting")
+                return
+            }
+            barRebuiltThisMeeting = true
+            AppLog.write("bar: window not composited after show(), rebuilding it once")
+            bar.hide()
+            bar = Bar(delegate: self)
+            presentBar(joinURL: joinURL)
+        }
     }
 
     private func endMeeting() {
