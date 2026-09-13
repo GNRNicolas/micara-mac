@@ -24,7 +24,10 @@ git commit -q -m "release(mac): $VERSION"
 echo "→ build.sh at $VERSION, committed"
 
 # 2. Mirror: the history of bridge-swift/ alone, pushed as the public main.
+#    Edits made directly on GitHub (README from the web editor) are pulled in
+#    first, otherwise the push is rejected as non-fast-forward.
 ROOT="$(git rev-parse --show-toplevel)"
+git -C "$ROOT" subtree pull --prefix="$PREFIX" "$PUBLIC_REMOTE" main -q -m "merge(mac): edits made on the public mirror" 2>/dev/null || true
 SPLIT="$(git -C "$ROOT" subtree split --prefix="$PREFIX" 2>/dev/null)"
 git -C "$ROOT" push -q "$PUBLIC_REMOTE" "$SPLIT:main"
 echo "→ mirrored into $PUBLIC_REPO"
