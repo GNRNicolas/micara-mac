@@ -31,6 +31,19 @@ public func rmsDb(_ samples: [Float]) -> Float {
     samples.withUnsafeBufferPointer { rmsDb($0) }
 }
 
+/// Same measurement for the meters that ACCUMULATE over a window instead of
+/// reading a buffer: they hold a sum of squares and a sample count, and the
+/// audio thread must not walk a buffer again just to get a level.
+///
+/// `nil` when nothing went through since the last call — a brand-new channel or
+/// a stopped engine has no level, which is not the same as a silent one.
+public func meanSquareDb(sumSquares: Double, count: Int) -> Float? {
+    guard count > 0 else { return nil }
+    let rms = (sumSquares / Double(count)).squareRoot()
+    if rms <= 1e-9 { return dbFloor }
+    return max(Float(20 * log10(rms)), dbFloor)
+}
+
 /// Mixing mode, exposed in the menu bar menu.
 /// "Dominance + gate" = the mixer below; "Sum" = gains at 1, with only the
 /// output limiter guarding against clipping.

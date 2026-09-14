@@ -24,6 +24,23 @@ struct RmsDbTests {
         #expect(rmsDb([Float]()) == dbFloor)
     }
 
+    // `meanSquareDb` is the same measurement for the accumulating meters (the
+    // per-channel one and the mix one). It must agree with `rmsDb` on the same
+    // signal, and it must tell "nothing went through" apart from "silence".
+    @Test func accumulatedNothingIsNotSilence() {
+        #expect(meanSquareDb(sumSquares: 0, count: 0) == nil)
+        #expect(meanSquareDb(sumSquares: 0, count: 1024) == dbFloor)
+    }
+
+    @Test func accumulatedSineMatchesTheBufferMeasurement() {
+        let n = 1024
+        let sine = (0..<n).map { Float(sin(Double($0) / Double(n) * 2 * Double.pi)) }
+        let sumSquares = sine.reduce(0.0) { $0 + Double($1) * Double($1) }
+        let accumulated = meanSquareDb(sumSquares: sumSquares, count: n)
+        #expect(accumulated != nil)
+        #expect(abs(accumulated! - rmsDb(sine)) < 1e-4)
+    }
+
     @Test func gainFromDecibels() {
         #expect(abs(gainFromDb(0) - 1) < 1e-6)
         #expect(abs(gainFromDb(-6) - 0.5011872) < 1e-6)
