@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 
 NAME="Micara"
 ID="com.getmicara.mac"
-VERSION="0.1.0"
+VERSION="0.1.1"
 APP="build/$NAME.app"
 WEBRTC_VERSION="150.7871.02"
 WEBRTC_URL="https://github.com/livekit/webrtc-xcframework/releases/download/$WEBRTC_VERSION/LiveKitWebRTC.xcframework.zip"
