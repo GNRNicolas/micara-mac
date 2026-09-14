@@ -77,21 +77,7 @@ let localChannelID = "__local__"
 /// All mixing happens at 48 kHz mono: that is WebRTC's output rate and
 /// BlackHole's. One rate in the graph = one conversion, at each channel's
 /// input.
-private let mixSampleRate: Double = 48_000
-
-/// Output limiter: same constants as the JS `DynamicsCompressor` (`mixComp`),
-/// tuned in real meetings. Without it, the +10 dB input gain plus close speech
-/// clip at the final conversion ("distorted voice", 19/08).
-private let limiterThresholdDb: Float = -6
-private let limiterKneeDb: Float = 6
-private let limiterRatio: Float = 20
-private let limiterAttackSec: Float = 0.002
-private let limiterReleaseSec: Float = 0.15
-
-/// Ceiling on the lag tolerated in a ring buffer before the oldest samples are
-/// dropped. WHY: WebRTC's clock and BlackHole's are not the same one; without
-/// pruning, the drift piles up into permanent latency.
-private let maxRingLatencySec: Double = 0.20
+let mixSampleRate: Double = 48_000
 
 /// Window of the level meter and of the mixing tick (`MIX.tickMs` in the JS).
 private let tickSec: Double = 0.05
@@ -100,13 +86,15 @@ private let tickSec: Double = 0.05
 
 /// `MonoRing` (MicaraCore, tested): one producer (the WebRTC thread or the mic
 /// tap), one consumer (the CoreAudio thread), FIFO order guaranteed.
-private typealias Ring = MonoRing
+/// Internal, not private: `Channel.ring` is read by the render block in
+/// AudioOutput.swift.
+typealias Ring = MonoRing
 
 // MARK: - Channel
 
 /// One stream in the mix: the ring fed by WebRTC (or by the mic), the
 /// smoothing state (audio thread only) and the mailbox shared with the tick.
-private final class Channel {
+final class Channel {
     let id: String
     let isLocal: Bool
     let ring = Ring(capacity: Int(mixSampleRate / 2))  // 500 ms
@@ -231,201 +219,6 @@ private final class TrackRenderer: NSObject, LKRTCAudioRenderer {
     }
 }
 
-// MARK: - Audio-thread state
-
-/// Everything the render block touches. A separate object (rather than
-/// `AudioEngine`) so the block can capture it strongly without creating a cycle
-/// with the engine.
-private final class Mixdown {
-    var config: MixerConfig
-    private var stateLock = os_unfair_lock_s()
-    private var pendingChannels: [Channel]?
-    /// Copy owned by the audio thread alone: avoids taking the lock when
-    /// nothing has changed (the case for 99.99 % of blocks).
-    private var renderChannels: [Channel] = []
-
-    private var _mode: MixMode = .dominance
-    private var _muted = false
-    private var outSumSquares: Double = 0
-    private var outSampleCount: Int = 0
-    /// Number of rendered blocks — diagnostics: zero = the output graph is not
-    /// running at all (device taken by another process, format refused…).
-    private(set) var renderCount: Int = 0
-
-    // Pre-allocated buffers: no allocation in the render block.
-    private let maxFrames = 8192
-    private let scratch: UnsafeMutablePointer<Float>
-    private let mix: UnsafeMutablePointer<Float>
-
-    // Limiter state (audio thread only).
-    private var envelope: Float = 0
-    private let attackCoef: Float
-    private let releaseCoef: Float
-
-    init(config: MixerConfig) {
-        self.config = config
-        scratch = .allocate(capacity: maxFrames)
-        mix = .allocate(capacity: maxFrames)
-        scratch.initialize(repeating: 0, count: maxFrames)
-        mix.initialize(repeating: 0, count: maxFrames)
-        let dt = Float(1.0 / mixSampleRate)
-        attackCoef = 1 - expf(-dt / limiterAttackSec)
-        releaseCoef = 1 - expf(-dt / limiterReleaseSec)
-    }
-
-    deinit {
-        scratch.deinitialize(count: maxFrames)
-        scratch.deallocate()
-        mix.deinitialize(count: maxFrames)
-        mix.deallocate()
-    }
-
-    var mode: MixMode {
-        get { withLock { _mode } }
-        set { withLock { _mode = newValue } }
-    }
-
-    var phonesMuted: Bool {
-        get { withLock { _muted } }
-        set { withLock { _muted = newValue } }
-    }
-
-    func publish(channels: [Channel]) {
-        withLock { pendingChannels = channels }
-    }
-
-    /// Snapshot for the tick (off the audio thread).
-    func channelsSnapshot() -> [Channel] {
-        withLock { pendingChannels ?? renderChannels }
-    }
-
-    /// Level of the mix over the elapsed window, in dBFS. `nil` if the engine
-    /// has not rendered a single block since the last call (engine stopped).
-    func drainOutputDb() -> Float? {
-        var s: Double = 0
-        var n = 0
-        withLock {
-            s = outSumSquares
-            n = outSampleCount
-            outSumSquares = 0
-            outSampleCount = 0
-        }
-        guard n > 0 else { return nil }
-        let rms = (s / Double(n)).squareRoot()
-        if rms <= 1e-9 { return dbFloor }
-        return max(Float(20 * log10(rms)), dbFloor)
-    }
-
-    private func withLock<T>(_ body: () -> T) -> T {
-        os_unfair_lock_lock(&stateLock)
-        defer { os_unfair_lock_unlock(&stateLock) }
-        return body()
-    }
-
-    // MARK: render block (CoreAudio thread — no allocation, no long lock)
-
-    func render(frameCount: Int, output: UnsafeMutableAudioBufferListPointer) -> OSStatus {
-        let frames = min(frameCount, maxFrames)
-        renderCount += 1
-
-        // Pick up the new channel list WITHOUT blocking: if the tick or the
-        // main queue holds the lock, we keep the previous list for one more
-        // block (5-10 ms) rather than wait on the audio thread.
-        if os_unfair_lock_trylock(&stateLock) {
-            if let pending = pendingChannels {
-                renderChannels = pending
-                pendingChannels = nil
-            }
-            os_unfair_lock_unlock(&stateLock)
-        }
-        let muted = _muted  // unlocked read of a Bool: at worst we apply the
-        // previous value for one block.
-
-        mix.update(repeating: 0, count: frames)
-        let inputGain = gainFromDb(config.inputGainDb)
-        let maxLatencyFrames = Int(maxRingLatencySec * mixSampleRate)
-        let dt = Float(Double(frames) / mixSampleRate)
-
-        for channel in renderChannels {
-            channel.ring.read(into: scratch, count: frames, dropOlderThan: maxLatencyFrames)
-
-            // Input gain BEFORE the measurement: that is the JS order (source →
-            // inputGain → analyser), and it is what makes the -45 dB gate open
-            // for a phone lying two metres away.
-            var sumSq: Double = 0
-            for i in 0..<frames {
-                let s = scratch[i] * inputGain
-                scratch[i] = s
-                sumSq += Double(s) * Double(s)
-            }
-            channel.accumulate(sumSquares: sumSq, count: frames)
-
-            // The Mac's mic is NEVER silenced by "Mute": the admin must stay
-            // audible in Teams (rule 6 of the spec).
-            let target = (muted && !channel.isLocal) ? 0 : channel.targetGain
-            let from = channel.smoother.value
-            let to = channel.smoother.step(target: target, dtSec: dt)
-            // Linear ramp across the block: applying the smoothed gain as a
-            // staircase (one value per block) is audible as a click on every
-            // switch.
-            let slope = frames > 1 ? (to - from) / Float(frames) : 0
-            for i in 0..<frames {
-                mix[i] += scratch[i] * (from + slope * Float(i))
-            }
-        }
-
-        limit(frames: frames)
-
-        var sumSq: Double = 0
-        for i in 0..<frames { sumSq += Double(mix[i]) * Double(mix[i]) }
-        if os_unfair_lock_trylock(&stateLock) {
-            outSumSquares += sumSq
-            outSampleCount += frames
-            os_unfair_lock_unlock(&stateLock)
-        }
-
-        // BlackHole 16ch: the mix leaves as duplicated stereo on channels 1-2,
-        // the rest at zero. Teams/Zoom only take the aggregate's first two
-        // channels; writing anywhere else would be invisible to them.
-        for (index, buffer) in output.enumerated() {
-            guard let raw = buffer.mData else { continue }
-            let ptr = raw.assumingMemoryBound(to: Float.self)
-            if index < 2 {
-                ptr.update(from: mix, count: frames)
-            } else {
-                ptr.update(repeating: 0, count: frames)
-            }
-            if frames < frameCount {
-                (ptr + frames).update(repeating: 0, count: frameCount - frames)
-            }
-        }
-        return noErr
-    }
-
-    /// Soft-knee limiter on the mix, the equivalent of the JS
-    /// `DynamicsCompressor` (threshold -6 dBFS, knee 6 dB, ratio 20, attack
-    /// 2 ms, release 150 ms). The final clip at ±1 is a belt: the limiter lets
-    /// through a transient shorter than its attack, the conversion downstream
-    /// does not.
-    private func limit(frames: Int) {
-        for i in 0..<frames {
-            let magnitude = abs(mix[i])
-            envelope += (magnitude - envelope) * (magnitude > envelope ? attackCoef : releaseCoef)
-            let envDb = 20 * log10f(max(envelope, 1e-9))
-            let over = envDb - limiterThresholdDb
-            var reduction: Float = 0
-            if over >= limiterKneeDb / 2 {
-                reduction = over * (1 - 1 / limiterRatio)
-            } else if over > -limiterKneeDb / 2 {
-                let t = over + limiterKneeDb / 2
-                reduction = (1 - 1 / limiterRatio) * t * t / (2 * limiterKneeDb)
-            }
-            let y = mix[i] * gainFromDb(-reduction)
-            mix[i] = min(max(y, -1), 1)
-        }
-    }
-}
-
 // MARK: - Engine
 
 enum AudioEngineError: Error, CustomStringConvertible {
@@ -464,7 +257,7 @@ final class AudioEngine {
 
     // MARK: internal state
 
-    private let config: MixerConfig
+    let config: MixerConfig
     private let mixer: DominanceMixer
     private let mixdown: Mixdown
 
@@ -479,12 +272,12 @@ final class AudioEngine {
     /// live (12/09): "dispatch_sync called on queue already owned by current
     /// thread", at the end of every meeting once a phone had joined.
     private static let queueKey = DispatchSpecificKey<Void>()
-    private var channels: [String: Channel] = [:]
+    var channels: [String: Channel] = [:]
     private var renderers: [String: TrackRenderer] = [:]
     private var tracks: [String: LKRTCAudioTrack] = [:]
 
     private var outputEngine: AVAudioEngine?
-    private var inputEngine: AVAudioEngine?
+    var inputEngine: AVAudioEngine?
     /// What `start` was asked for, so a configuration change can rebuild the
     /// same graph.
     private var requestedOutputUID: String?
@@ -493,10 +286,10 @@ final class AudioEngine {
     private var pendingRebuild: DispatchWorkItem?
     private var sourceNode: AVAudioSourceNode?
     private var tickTimer: DispatchSourceTimer?
-    private var inputConverter: AVAudioConverter?
-    private var inputConverterFormat: AVAudioFormat?
+    var inputConverter: AVAudioConverter?
+    var inputConverterFormat: AVAudioFormat?
     /// Mono buffer reused by the mic tap (no allocation per buffer).
-    private var localMono: [Float] = []
+    var localMono: [Float] = []
 
     /// Current dominant (diagnostics / log), published by the tick.
     private(set) var dominantID: String?
@@ -507,6 +300,14 @@ final class AudioEngine {
     /// system's default input (a VPIO limitation, cf. `startInput`) — the UI and
     /// the log must be able to say so.
     private(set) var inputEchoCancelled = false
+
+    /// The only way to write the two properties above, so that the rest of the
+    /// module keeps reading them and nothing else sets them. `startInput`
+    /// (AudioInput.swift) is in another file, hence not a `private` setter.
+    func adoptInput(name: String?, echoCancelled: Bool) {
+        inputDeviceName = name
+        inputEchoCancelled = echoCancelled
+    }
 
     init(config: MixerConfig = .default) {
         self.config = config
@@ -540,7 +341,7 @@ final class AudioEngine {
             // the phones are the point, the Mac's mic is a bonus.
             do { try startInput(uid: inputDeviceUID) } catch {
                 inputEngine = nil
-                inputDeviceName = nil
+                adoptInput(name: nil, echoCancelled: false)
                 AppLog.write("[audio] Mac mic NOT captured: \(error)")
             }
             if let name = inputDeviceName {
@@ -566,8 +367,7 @@ final class AudioEngine {
             inputEngine?.inputNode.removeTap(onBus: 0)
             inputEngine?.stop()
             inputEngine = nil
-            inputDeviceName = nil
-            inputEchoCancelled = false
+            adoptInput(name: nil, echoCancelled: false)
 
             outputEngine?.stop()
             if let node = sourceNode, let engine = outputEngine {
@@ -690,7 +490,7 @@ final class AudioEngine {
     /// graph is rebuilt on the same devices; phone channels are kept, only the
     /// engines and the local channel are recreated. Both engines post, so the
     /// rebuild is coalesced.
-    private func observeConfigurationChanges(of engine: AVAudioEngine) {
+    func observeConfigurationChanges(of engine: AVAudioEngine) {
         let token = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
         ) { [weak self] _ in self?.scheduleRebuild() }
@@ -734,215 +534,9 @@ final class AudioEngine {
         }
     }
 
-    // MARK: - The Mac's mic
-
-    private func startInput(uid: String?) throws {
-        guard let device = try resolveInputDevice(uid: uid) else {
-            throw AudioEngineError.noInputDevice
-        }
-        let channel = Channel(id: localChannelID, isLocal: true)
-        channel.smoother = GainSmoother(attackSec: config.attackSec, releaseSec: config.releaseSec)
-
-        // AEC (the equivalent of Chromium's `echoCancellation: true`): possible
-        // ONLY if the wanted mic is already the system's default input.
-        // Measured at the spike: `setVoiceProcessingEnabled(true)` brings the
-        // VPIO up on the DEFAULT INPUT and overwrites the device we had just
-        // forced (read back afterwards: 132 instead of 138). And forcing the
-        // device AFTER enabling it fails (-10875) every single time. So: AEC
-        // when the default is the right mic, capture without AEC otherwise.
-        // Never invert that priority — capturing BlackHole by mistake loops the
-        // mix onto itself.
-        // Measured in the real app (12/09): with the VPIO on, the output engine
-        // rendered 4 blocks and went silent for good the moment Micara became
-        // the default input, and the mic tap died with it. The VPIO tracks the
-        // default device and takes the shared I/O down with it. Echo
-        // cancellation is therefore OFF; Teams/Zoom run their own AEC on the
-        // Micara input anyway. Flip `aecAllowed` to try again after a change.
-        let aecAllowed = false
-        let canUseAEC = aecAllowed && AudioDevices.defaultInputUID() == device.uid
-        var engine: AVAudioEngine
-        do {
-            engine = try makeInputEngine(device: device, voiceProcessing: canUseAEC, channel: channel)
-            inputEchoCancelled = canUseAEC
-        } catch {
-            engine = try makeInputEngine(device: device, voiceProcessing: false, channel: channel)
-            inputEchoCancelled = false
-        }
-        channels[localChannelID] = channel
-        publishChannels()
-        inputEngine = engine
-        inputDeviceName = device.name
-    }
-
-    /// Brings up an input-only engine on a specific device.
-    ///
-    /// CRITICAL ORDER, found at the spike (any other sequence gives a tap that
-    /// NEVER fires, without the slightest error, or a unit that refuses to
-    /// initialise):
-    ///   1. `AudioUnitUninitialize` — you cannot change the device of an
-    ///      already-initialised unit: the property is ACCEPTED (status 0) and
-    ///      the tap stays silent forever;
-    ///   2. `kAudioOutputUnitProperty_CurrentDevice`;
-    ///   3. `AudioUnitInitialize`;
-    ///   4. `setVoiceProcessingEnabled` LAST (calling it earlier makes
-    ///      initialisation on the forced device fail);
-    ///   5. tap format = `inputFormat(forBus:)`, the HARDWARE format. With
-    ///      `outputFormat` or `nil`, no callback ever arrives.
-    ///
-    /// With the VPIO, the input bus exposes 5 channels CARRYING THE SAME SIGNAL
-    /// (measured: identical RMS to a tenth of a dB across all 5): taking
-    /// channel 0 is right, and letting `AVAudioConverter` "mix down" those 5
-    /// channels is not (see `pushLocal`).
-    private func makeInputEngine(
-        device: AudioDeviceInfo, voiceProcessing: Bool, channel: Channel
-    ) throws -> AVAudioEngine {
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-        guard let unit = input.audioUnit else {
-            throw AudioEngineError.coreAudio(-1, "input audio unit")
-        }
-        _ = AudioUnitUninitialize(unit)
-        var deviceID = device.id
-        let set = AudioUnitSetProperty(
-            unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
-            &deviceID, UInt32(MemoryLayout<AudioObjectID>.size)
-        )
-        guard set == noErr else {
-            throw AudioEngineError.coreAudio(set, "input device \(device.name)")
-        }
-        let initialized = AudioUnitInitialize(unit)
-        guard initialized == noErr else {
-            throw AudioEngineError.coreAudio(initialized, "AudioUnitInitialize (input)")
-        }
-        if voiceProcessing {
-            try input.setVoiceProcessingEnabled(true)
-        }
-        let format = input.inputFormat(forBus: 0)
-        guard format.channelCount > 0, format.sampleRate > 0 else {
-            throw AudioEngineError.coreAudio(-1, "empty input format")
-        }
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            self?.pushLocal(buffer, into: channel)
-        }
-        engine.prepare()
-        try engine.start()
-        observeConfigurationChanges(of: engine)
-        return engine
-    }
-
-    /// Converts the mic's buffer to 48 kHz mono and pushes it into the ring.
-    /// The tap does not run on the output's CoreAudio thread: allocating the
-    /// converter here has no consequence for rendering.
-    /// WHY NOT let `AVAudioConverter` do the channel reduction: with the VPIO
-    /// active, the Mac's mic arrives as 5 channels with no standard layout;
-    /// `AVAudioConverter` then refuses the conversion silently (no error
-    /// reported, zero frames produced — the mic stayed mute at the spike). So we
-    /// extract channel 0 ourselves, and the converter only resamples mono →
-    /// mono.
-    private func pushLocal(_ buffer: AVAudioPCMBuffer, into channel: Channel) {
-        guard let data = buffer.floatChannelData, buffer.frameLength > 0 else { return }
-        let frames = Int(buffer.frameLength)
-        let sourceRate = buffer.format.sampleRate
-        let stride = buffer.format.isInterleaved ? Int(buffer.format.channelCount) : 1
-
-        if localMono.count < frames { localMono = [Float](repeating: 0, count: frames * 2) }
-        localMono.withUnsafeMutableBufferPointer { mono in
-            let src = data[0]
-            for i in 0..<frames { mono[i] = src[i * stride] }
-        }
-
-        if sourceRate == mixSampleRate {
-            localMono.withUnsafeBufferPointer { channel.ring.write($0.baseAddress!, count: frames) }
-            return
-        }
-
-        guard let source = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                         sampleRate: sourceRate, channels: 1, interleaved: false),
-              let target = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                         sampleRate: mixSampleRate, channels: 1, interleaved: false)
-        else { return }
-        if inputConverter == nil || inputConverterFormat != source {
-            inputConverter = AVAudioConverter(from: source, to: target)
-            inputConverterFormat = source
-        }
-        guard let converter = inputConverter,
-              let input = AVAudioPCMBuffer(pcmFormat: source, frameCapacity: AVAudioFrameCount(frames))
-        else { return }
-        input.frameLength = AVAudioFrameCount(frames)
-        localMono.withUnsafeBufferPointer {
-            input.floatChannelData![0].update(from: $0.baseAddress!, count: frames)
-        }
-        let capacity = AVAudioFrameCount(Double(frames) * mixSampleRate / sourceRate) + 32
-        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
-        var consumed = false
-        var error: NSError?
-        converter.convert(to: out, error: &error) { _, status in
-            if consumed { status.pointee = .noDataNow; return nil }
-            consumed = true
-            status.pointee = .haveData
-            return input
-        }
-        guard error == nil, let converted = out.floatChannelData, out.frameLength > 0 else { return }
-        channel.ring.write(converted[0], count: Int(out.frameLength))
-    }
-
-    /// Picks the mic. NEVER "the default input device" without checking it:
-    /// during a meeting the default is the Micara aggregate, whose input is
-    /// BlackHole — that is, OUR OWN MIX. Capturing ourselves would build a loop
-    /// that climbs to the limiter within seconds.
-    private func resolveInputDevice(uid: String?) throws -> AudioDeviceInfo? {
-        let devices = AudioDevices.all().filter { $0.inputChannels > 0 }
-        let forbidden: (AudioDeviceInfo) -> Bool = { device in
-            device.uid == MicaraAggregate.uid
-                || device.isAggregate
-                || device.name.lowercased().contains("blackhole")
-        }
-        if let uid {
-            guard let forced = devices.first(where: { $0.uid == uid }) else {
-                throw AudioEngineError.deviceNotFound(uid)
-            }
-            // Even a caller's explicit choice is checked: after a crash
-            // mid-meeting the system default is still Micara, and the caller
-            // may hand it over in good faith. Measured live (12/09): "Mac mic:
-            // Micara" — the mix captured itself.
-            if !forbidden(forced) { return forced }
-            AppLog.write("[audio] requested mic \(forced.name) is Micara/BlackHole itself, picking another one")
-        }
-        if let current = AudioDevices.defaultInputUID(),
-           let device = devices.first(where: { $0.uid == current }),
-           !forbidden(device) {
-            return device
-        }
-        return devices.first { !forbidden($0) }
-    }
-
-    private func setDevice(_ id: AudioObjectID, on node: AVAudioIONode, what: String) throws {
-        guard let unit = node.audioUnit else {
-            throw AudioEngineError.coreAudio(-1, "\(what) audio unit")
-        }
-        // An already-initialised I/O unit refuses a device change: at the
-        // spike, the 3rd `start()` in a row failed with 'nope'
-        // (kAudioHardwareIllegalOperationError) while the first two went
-        // through. Uninitialising first makes the operation reproducible.
-        _ = AudioUnitUninitialize(unit)
-        defer { _ = AudioUnitInitialize(unit) }
-        var deviceID = id
-        let status = AudioUnitSetProperty(
-            unit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioObjectID>.size)
-        )
-        guard status == noErr else {
-            throw AudioEngineError.coreAudio(status, "kAudioOutputUnitProperty_CurrentDevice (\(what))")
-        }
-    }
-
     // MARK: - Tick
 
-    private func publishChannels() {
+    func publishChannels() {
         mixdown.publish(channels: Array(channels.values))
     }
 
