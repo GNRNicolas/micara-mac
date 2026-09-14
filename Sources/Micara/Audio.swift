@@ -131,10 +131,7 @@ final class Channel {
         sumSquares = 0
         sampleCount = 0
         os_unfair_lock_unlock(&lock)
-        guard n > 0 else { return nil }
-        let rms = (s / Double(n)).squareRoot()
-        if rms <= 1e-9 { return dbFloor }
-        return max(Float(20 * log10(rms)), dbFloor)
+        return meanSquareDb(sumSquares: s, count: n)
     }
 
     var targetGain: Float {

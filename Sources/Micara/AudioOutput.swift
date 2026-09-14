@@ -109,10 +109,7 @@ final class Mixdown {
             outSumSquares = 0
             outSampleCount = 0
         }
-        guard n > 0 else { return nil }
-        let rms = (s / Double(n)).squareRoot()
-        if rms <= 1e-9 { return dbFloor }
-        return max(Float(20 * log10(rms)), dbFloor)
+        return meanSquareDb(sumSquares: s, count: n)
     }
 
     private func withLock<T>(_ body: () -> T) -> T {

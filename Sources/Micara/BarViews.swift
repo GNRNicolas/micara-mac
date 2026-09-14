@@ -4,6 +4,21 @@ import QuartzCore
 
 import MicaraCore
 
+// MARK: - Hover tracking
+
+extension NSView {
+    /// The bar's three hover-sensitive views all want the same tracking area:
+    /// the whole view, followed even when Micara is not the frontmost app
+    /// (`.activeAlways`) and kept in step with scrolling (`.inVisibleRect`).
+    /// Call it from `updateTrackingAreas()`, after `super`.
+    func refreshHoverTracking() {
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self))
+    }
+}
+
 // The bar's reusable views, split out of Bar.swift: the pill's material and
 // its capsule buttons, the level meter, the phone dots, the QR icon and the
 // QR drawing itself. None of them knows about the meeting — they draw what
@@ -124,10 +139,7 @@ final class HoverPanelView: PillBackground {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: bounds,
-                                       options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-                                       owner: self))
+        refreshHoverTracking()
     }
 
     override func mouseEntered(with event: NSEvent) { onHoverChange?(true) }
@@ -255,10 +267,7 @@ final class PillButton: NSButton {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: bounds,
-                                       options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-                                       owner: self))
+        refreshHoverTracking()
     }
 
     override func mouseEntered(with event: NSEvent) { hovered = true; paint() }
@@ -307,10 +316,7 @@ final class QRToggle: NSImageView {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        trackingAreas.forEach(removeTrackingArea)
-        addTrackingArea(NSTrackingArea(rect: bounds,
-                                       options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-                                       owner: self))
+        refreshHoverTracking()
     }
 
     override func mouseEntered(with event: NSEvent) {
@@ -541,18 +547,23 @@ final class QRCodeView: NSView {
             (0..<width).map { x in pixels[(height - 1 - y) * width + x] < 128 }
         }
         // The quiet zone is redrawn by the panel's padding: we strip it here,
-        // otherwise the QR floats off-centre in its frame.
+        // otherwise the QR floats off-centre in its frame. Blank columns are
+        // blank rows of the transposed grid — one trim, used twice.
+        guard let rows = trimBlankEdges(grid),
+              let columns = trimBlankEdges(transposed(rows)) else { return [] }
+        return transposed(columns)
+    }
+
+    /// Drops the all-white rows at both ends. `nil` if nothing is left.
+    private static func trimBlankEdges(_ grid: [[Bool]]) -> [[Bool]]? {
+        var grid = grid
         while let first = grid.first, !first.contains(true) { grid.removeFirst() }
         while let last = grid.last, !last.contains(true) { grid.removeLast() }
-        guard !grid.isEmpty else { return [] }
-        while grid.allSatisfy({ !($0.first ?? false) }) {
-            for i in grid.indices { grid[i].removeFirst() }
-            if grid[0].isEmpty { return [] }
-        }
-        while grid.allSatisfy({ !($0.last ?? false) }) {
-            for i in grid.indices { grid[i].removeLast() }
-            if grid[0].isEmpty { return [] }
-        }
-        return grid
+        return grid.isEmpty ? nil : grid
+    }
+
+    private static func transposed(_ grid: [[Bool]]) -> [[Bool]] {
+        guard let width = grid.first?.count, width > 0 else { return [] }
+        return (0..<width).map { x in grid.map { $0[x] } }
     }
 }
