@@ -41,9 +41,10 @@ else
 fi
 
 # 3. The release the app looks for (tag_name vX.Y.Z, compared to VERSION).
+PREV_GH_ACCOUNT="$(gh api user -q .login 2>/dev/null || true)"
 gh auth switch -u GNRNicolas >/dev/null 2>&1 || true
 gh release create "v$VERSION" --repo "$PUBLIC_REPO" --title "Micara $VERSION" \
   --notes "Update: in the folder you cloned, \`git pull && ./build.sh --install\` — or accept the prompt Micara shows within a day." >/dev/null
-gh auth switch -u digimatsu >/dev/null 2>&1 || true
+[ -n "${PREV_GH_ACCOUNT:-}" ] && gh auth switch -u "$PREV_GH_ACCOUNT" >/dev/null 2>&1 || true
 echo "→ https://github.com/$PUBLIC_REPO/releases/tag/v$VERSION"
 echo "  Remember to push this branch of the private repo too."
